@@ -1,162 +1,282 @@
 import streamlit as st
 import os
-import sys
 from pathlib import Path
-import time
-import logging
+from datetime import datetime
+
+# Core Engine Imports
+from config import config
+from schema import IngestionResult, SearchResult
 from ingestion_engine import IngestionEngine
+from vector_engine import VectorEngine
+from generation_engine import GenerationEngine, RAGOrchestrator
 
-# --- CUSTOM LOGGING HANDLER FOR STREAMLIT ---
-class StreamlitLogHandler(logging.Handler):
-    def __init__(self, log_area):
-        super().__init__()
-        self.log_area = log_area
-        self.log_buffer = []
+# --- ARCHITECTURAL STYLING ---
+st.set_page_config(
+    page_title="Zenith Vault | Document Intelligence",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    def emit(self, record):
-        msg = self.format(record)
-        self.log_buffer.append(msg)
-        # Keep only the last 50 lines for performance
-        if len(self.log_buffer) > 50:
-            self.log_buffer.pop(0)
-        self.log_area.code("\n".join(self.log_buffer))
+# Custom Corporate CSS
+st.markdown("""
+<style>
+    /* Global Styles */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #1e1e1e; }
+    
+    /* Sidebar Sophistication */
+    section[data-testid="stSidebar"] { background-color: #f8f9fa; border-right: 1px solid #e9ecef; }
+    .st-emotion-cache-16idsys p { font-weight: 600; color: #495057; }
+    
+    /* Card-based Citations */
+    .citation-card {
+        padding: 12px 16px;
+        border-radius: 8px;
+        border: 1px solid #e0e0e0;
+        background-color: #ffffff;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+    }
+    .citation-header {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #6c757d;
+        margin-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+    }
+    .citation-text { font-size: 0.9rem; line-height: 1.5; color: #343a40; }
+    .source-label { background: #e7f1ff; color: #0056b3; padding: 2px 8px; border-radius: 4px; font-weight: bold; }
+    
+    /* Button Refinement */
+    div.stButton > button:first-child {
+        border-radius: 6px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        padding: 0.5rem 1.5rem;
+    }
+    
+    /* Metrics & Log Styling */
+    .log-entry { font-family: 'Consolas', monospace; font-size: 0.85rem; padding: 4px 8px; border-bottom: 1px solid #eee; }
+</style>
+""", unsafe_allow_html=True)
 
-# --- APP CONFIG ---
-st.set_page_config(page_title="Docling Pro Ingestion GUI", layout="wide")
+# --- STATE PERSISTENCE ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "session_logs" not in st.session_state:
+    st.session_state.session_logs = []
 
-st.title("🚀 Docling Professional Ingestion (Offline)")
-st.markdown("Automate PDF parsing and chunking with professional-grade controls.")
+# --- ENGINE PROVIDER ---
+@st.cache_resource
+def initialize_system():
+    try:
+        ve = VectorEngine()
+        ge = GenerationEngine()
+        return ve, ge, RAGOrchestrator(ve, ge)
+    except Exception as e:
+        st.error(f"System Initialization Failure: {e}")
+        return None, None, None
 
-# --- SIDEBAR: GLOBAL SETTINGS ---
+# --- SIDEBAR NAVIGATION ---
 with st.sidebar:
-    st.header("⚙️ Core Configuration")
-    chunking_strategy = st.selectbox(
-        "Chunking Strategy", 
-        ["Hybrid", "Hierarchical"],
-        help="Select the method for breaking down document text."
-    )
-    
-    with st.expander("❓ Help: Which strategy to choose?"):
-        st.markdown("""
-        **Hybrid Chunking:**
-        - *Best for:* Certificates, forms, and technical sheets.
-        - *Why:* Keeps labels and values together. Handles tables exceptionally well.
-        
-        **Hierarchical Chunking:**
-        - *Best for:* Text-heavy documents, reports, and books.
-        - *Why:* Respects document structure (headings, sub-headings) for better semantic context.
-        """)
-
-    st.divider()
-    st.subheader("Parsing Options")
-    use_formula = st.checkbox("Enable Formulas", value=False)
-    use_ocr = st.checkbox("Enable OCR (RapidOCR)", value=True)
+    st.title("Zenith Vault")
+    st.caption("Intelligence at the Edge")
     
     st.divider()
-    st.subheader("Range Settings")
-    skip_start = st.number_input("Skip Pages (Start)", min_value=0, value=0)
-    skip_end = st.number_input("Skip Pages (End)", min_value=0, value=0)
-
-# --- MAIN INTERFACE: TABS ---
-tab1, tab2 = st.tabs(["📥 Ingestion", "📜 Live Logs"])
-
-with tab1:
-    col1, col2 = st.columns(2)
+    nav_choice = st.radio("Management", ["Process Center", "Research Lab", "System Status"], label_visibility="collapsed")
     
-    with col1:
-        mode = st.radio("Processing Mode", ["Single File", "Batch (Folder)"])
-    
-    with col2:
-        output_root = st.text_input("Output Directory", value=str(Path.home() / "parsing_output"))
-
-    if mode == "Single File":
-        pdf_path = st.text_input("Input PDF Path", placeholder="C:\\path\\to\\file.pdf")
-    else:
-        folder_path = st.text_input("Input Folder Path", placeholder="C:\\path\\to\\pdf_folder")
-        pdf_path = None # Will be populated during loop
-
     st.divider()
+    st.subheader("Workflow Scope")
+    run_extraction = st.checkbox("Data Extraction", value=True)
+    run_indexing = st.checkbox("Vector Indexing", value=True)
     
-    # Progress UI
-    status_msg = st.empty()
-    progress_bar = st.progress(0)
+    st.divider()
+    st.subheader("Preferences")
+    theme_accurate = st.toggle("Focus on Accuracy", value=True)
     
-    if st.button("▶️ Start Ingestion", type="primary", use_container_width=True):
-        # Validation
-        inputs_valid = False
-        files_to_process = []
-        
-        if mode == "Single File":
-            if pdf_path and os.path.exists(pdf_path):
-                files_to_process = [pdf_path]
-                inputs_valid = True
-            else:
-                st.error("Invalid file path.")
+    if st.button("Reset Environment", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.session_logs = []
+        st.cache_resource.clear()
+        st.rerun()
+
+# --- MAIN INTERFACE ---
+
+# 1. PROCESS CENTER (Ingestion & Pipeline)
+if nav_choice == "Process Center":
+    st.header("Document Processing Center")
+    st.markdown("Automate the transformation of unstructured documents into searchable knowledge assets.")
+    
+    with st.container(border=True):
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            source_path = st.text_input("Source Path (PDF or Folder)", placeholder="e.g., C:\\Analysis\\Reports")
+            target_path = st.text_input("Output Destination", value=str(config.OUTPUT_ROOT))
+        with c2:
+            s_range = st.expander("Page Constraints", expanded=True)
+            with s_range:
+                skip_head = st.number_input("Header Skip", 0, 500, 0)
+                skip_tail = st.number_input("Footer Skip", 0, 500, 0)
+
+    st.subheader("Configuration")
+    t1, t2, t3 = st.tabs(["OCR Settings", "Segmentation", "Extraction"])
+    
+    with t1:
+        cc1, cc2 = st.columns(2)
+        ocr_enabled = cc1.toggle("Optical Character Recognition", value=True)
+        formula_enabled = cc2.toggle("Mathematical Notation", value=True)
+    with t2:
+        seg_strategy = st.selectbox("Methodology", ["Hybrid (Context Aware)", "Hierarchical (Structural)"])
+        cc1, cc2 = st.columns(2)
+        chunk_val = cc1.number_input("Max Token Capacity", 256, 1024, 512, step=64)
+        overlap_val = cc2.number_input("Semantic Overlap", 0, 128, 64, step=8)
+    with t3:
+        extract_mode = st.selectbox("Extraction Fidelity", ["accurate", "fast"], index=0 if theme_accurate else 1)
+
+    if st.button("Execute Workflow", type="primary", use_container_width=True):
+        if not source_path or not os.path.exists(source_path):
+            st.error("Operation Aborted: Valid source path required.")
         else:
-            if folder_path and os.path.exists(folder_path):
-                files_to_process = [str(f) for f in Path(folder_path).glob("*.pdf")]
-                if files_to_process:
-                    inputs_valid = True
-                else:
-                    st.error("No PDFs found in the selected folder.")
+            p_bar = st.progress(0)
+            status = st.empty()
+            
+            # Preparation
+            files = [str(f) for f in Path(source_path).glob("*.pdf")] if os.path.isdir(source_path) else ([source_path] if source_path.endswith(".pdf") else [])
+            
+            if not files:
+                st.warning("Notification: No valid documents identified.")
             else:
-                st.error("Invalid folder path.")
-
-        if inputs_valid:
-            # Setup Logger for tab2
-            with tab2:
-                st.subheader("Real-time Process Logs")
-                log_display = st.empty()
-                streamlit_handler = StreamlitLogHandler(log_display)
-                streamlit_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-                
-                # Get the logger from ingestion_engine
-                engine_logger = logging.getLogger("IngestionEngine")
-                engine_logger.addHandler(streamlit_handler)
-
-            total_files = len(files_to_process)
-            try:
-                engine = IngestionEngine(
-                    use_ocr=use_ocr, 
-                    use_formula=use_formula, 
-                    chunking_strategy=chunking_strategy
+                ie = IngestionEngine(
+                    use_ocr=ocr_enabled, use_formula=formula_enabled, 
+                    chunking_strategy=seg_strategy.split()[0], table_mode=extract_mode,
+                    max_tokens=chunk_val, overlap=overlap_val
                 )
                 
-                for idx, file in enumerate(files_to_process):
-                    p_val = int(((idx) / total_files) * 100)
-                    progress_bar.progress(p_val)
+                results_batch = []
+                for idx, f in enumerate(files):
+                    status.info(f"Analyzing {idx+1}/{len(files)}: {Path(f).name}")
+                    try:
+                        if run_extraction:
+                            res = ie.process(f, output_root=target_path, skip_start=skip_head, skip_end=skip_tail)
+                            results_batch.append(res.output_path)
+                            st.session_state.session_logs.append(f"SUCCESS: Extracted {res.total_chunks} segments from {res.pdf_name}")
+                        
+                        if run_indexing:
+                            ve, _, _ = initialize_system()
+                            path_to_index = results_batch[-1] if run_extraction else source_path
+                            ve.add_processed_folder(path_to_index)
+                            st.session_state.session_logs.append(f"SUCCESS: Indexed metadata for {Path(f).name}")
+                            
+                    except Exception as e:
+                        st.session_state.session_logs.append(f"FAILURE: {Path(f).name} - {str(e)}")
                     
-                    filename = Path(file).name
-                    status_msg.info(f"📁 Processing {idx+1}/{total_files}: **{filename}**")
-                    
-                    # Core process call with callback for status updates
-                    def update_status(text):
-                        status_msg.markdown(f"**Current Step:** {text} (File {idx+1}/{total_files})")
-                    
-                    engine.process(
-                        file, 
-                        output_root, 
-                        skip_start=skip_start, 
-                        skip_end=skip_end, 
-                        status_callback=update_status
-                    )
+                    p_bar.progress((idx + 1) / len(files))
                 
-                progress_bar.progress(100)
-                status_msg.success(f"✅ Successfully processed {total_files} file(s)!")
+                status.success("Workflow Execution Finalized.")
                 st.balloons()
-                
-            except Exception as e:
-                status_msg.error(f"❌ FATAL ERROR: {str(e)}")
-                st.exception(e)
-            finally:
-                # Cleanup logging handler
-                engine_logger.removeHandler(streamlit_handler)
-                import gc
-                gc.collect()
 
-with tab2:
-    if 'log_display' not in locals():
-        st.info("Logs will appear here once the process starts.")
+    if st.session_state.session_logs:
+        with st.expander("Operational Audit Log", expanded=True):
+            for entry in reversed(st.session_state.session_logs):
+                st.markdown(f"<div class='log-entry'>{entry}</div>", unsafe_allow_html=True)
+
+# 2. RESEARCH LAB (Chat Interface)
+elif nav_choice == "Research Lab":
+    st.header("Inquiry Lab")
+    st.markdown("Engage with your data through natural language search and synthesis.")
+    
+    ve, ge, orch = initialize_system()
+    
+    if not ve or ve.collection.count() == 0:
+        st.warning("System Readiness: Knowledge base is currently empty. Please process documents in the Center first.")
+        st.stop()
+
+    # Chat Container
+    chat_container = st.container(height=500, border=False)
+    with chat_container:
+        for m in st.session_state.messages:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+                if "citations" in m:
+                    with st.expander("Validation Details"):
+                        for c in m["citations"]:
+                            st.markdown(f"""
+                            <div class="citation-card">
+                                <div class="citation-header">
+                                    <span>Source: {c.metadata.get('pdf_name')}</span>
+                                    <span>P. {c.metadata.get('pages')}</span>
+                                </div>
+                                <div class="citation-text">
+                                    <b>{c.metadata.get('breadcrumb')}</b><br/>
+                                    <i>"{c.text[:350]}..."</i>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+    if q := st.chat_input("Input inquiry..."):
+        st.session_state.messages.append({"role": "user", "content": q})
+        with chat_container:
+            with st.chat_message("user"): st.markdown(q)
+            
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                full_text = ""
+                hits = []
+                
+                stream = orch.query_stream(q, top_k=5)
+                for chunk in stream:
+                    if chunk["type"] == "sources": hits = chunk["content"]
+                    elif chunk["type"] == "answer_chunk":
+                        full_text += chunk["content"]
+                        placeholder.markdown(full_text + "▌")
+                
+                placeholder.markdown(full_text)
+                
+                if hits:
+                    with st.expander("Validation Details", expanded=False):
+                        for c in hits:
+                            st.markdown(f"""
+                            <div class="citation-card">
+                                <div class="citation-header">
+                                    <span>Source: {c.metadata.get('pdf_name')}</span>
+                                    <span>P. {c.metadata.get('pages')}</span>
+                                </div>
+                                <div class="citation-text">
+                                    <b>{c.metadata.get('breadcrumb')}</b><br/>
+                                    <i>"{c.text[:350]}..."</i>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                st.session_state.messages.append({"role": "assistant", "content": full_text, "citations": hits})
+
+# 3. SYSTEM STATUS
+elif nav_choice == "System Status":
+    st.header("Infrastructure & Health")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Resource Utilization")
+        import torch
+        st.metric("Computation Engine", "CUDA (GPU)" if torch.cuda.is_available() else "Standard (CPU)")
+        if torch.cuda.is_available():
+            st.caption(f"Accelerator: {torch.cuda.get_device_name(0)}")
+        
+        st.divider()
+        st.subheader("Data Integrity")
+        ve, _, _ = initialize_system()
+        st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
+        
+    with c2:
+        st.subheader("Environment Configuration")
+        st.code(f"""
+Base Directory: {config.BASE_DIR}
+Model Repository: {config.MODELS_CACHE.name}
+Database Engine: ChromaDB (Persistent)
+        """)
 
 st.divider()
-st.caption("Docling Professional Suite | Offline Mode Enabled")
+st.caption(f"Zenith Vault Framework | {datetime.now().strftime('%Y-%m-%d')} | Authentication: Offline Local")
