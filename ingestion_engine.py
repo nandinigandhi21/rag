@@ -4,6 +4,7 @@ import json
 import logging
 import gc
 import fitz
+import streamlit as st
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -96,7 +97,7 @@ class IngestionEngine:
         for d in [job_dir, img_dir, table_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Processing (Accurate Mode): {pdf_path.name}")
+        logger.info(f"Processing (PDF: {pdf_path.name})")
         start_time = time.time()
 
         try:
@@ -112,58 +113,82 @@ class IngestionEngine:
             if start_p > end_p: end_p = total_pages # Fallback
 
             # 2. Convert
-            if status_callback: status_callback(f"Extracting high-fidelity structure from {pdf_path.name}...")
+            if status_callback: status_callback(f"Extracting structure from {pdf_path.name} (Pages {start_p}-{end_p})...")
+            logger.info(f"Starting conversion for {pdf_path.name}...")
             conv_res = self.converter.convert(pdf_path, page_range=(start_p, end_p))
             doc = conv_res.document
+            logger.info(f"Conversion complete. Extracted {len(doc.pages)} pages.")
 
             # 3. Assets
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                for i, table in enumerate(doc.tables):
-                    executor.submit(self._save_table, table, i, table_dir)
-                for i, element in enumerate(doc.pictures):
-                    executor.submit(self._save_image, element, i, img_dir)
+            logger.info("Saving tables and images (sequential to save memory)...")
+            for i, table in enumerate(doc.tables):
+                self._save_table(table, i, table_dir)
+            for i, element in enumerate(doc.pictures):
+                self._save_image(element, i, img_dir)
 
             # 4. Markdown
+            logger.info("Exporting to Markdown...")
             md_path = job_dir / f"{pdf_path.stem}.md"
             with open(md_path, "w", encoding="utf-8") as f:
                 f.write(doc.export_to_markdown(image_mode=ImageRefMode.REFERENCED))
 
             # 5. Chunks
+            logger.info(f"Starting chunking with strategy: {self.strategy}...")
+            if status_callback: status_callback("Analyzing document structure and generating chunks...")
+            
             chunks_data = []
-            for i, chunk in enumerate(self.chunker.chunk(dl_doc=doc)):
-                page_nos = set()
-                is_tab = False
+            try:
+                for i, chunk in enumerate(self.chunker.chunk(dl_doc=doc)):
+                    page_nos = set()
+                    is_tab = False
+                    
+                    if hasattr(chunk.meta, 'doc_items'):
+                        for item in chunk.meta.doc_items:
+                            if hasattr(item, 'label') and item.label == 'table': is_tab = True
+                            if hasattr(item, 'prov') and item.prov:
+                                for p in item.prov: page_nos.add(p.page_no)
+                    
+                    headings = getattr(chunk.meta, 'headings', []) or []
+                    
+                    meta = DocumentMetadata(
+                        pages=sorted(list(page_nos)),
+                        total_pages=total_pages,
+                        headings=headings,
+                        breadcrumb=" > ".join(headings) if headings else "General",
+                        is_table=is_tab,
+                        char_count=len(chunk.text),
+                        strategy=self.strategy,
+                        source_name=pdf_path.name,
+                        doc_title=title,
+                        doc_author=author
+                    )
+                    
+                    chunks_data.append(Chunk(chunk_id=i+1, text=chunk.text, metadata=meta).model_dump())
+                    
+                    if (i + 1) % 100 == 0:
+                        logger.info(f"Generated {i+1} chunks...")
                 
-                if hasattr(chunk.meta, 'doc_items'):
-                    for item in chunk.meta.doc_items:
-                        if hasattr(item, 'label') and item.label == 'table': is_tab = True
-                        if hasattr(item, 'prov') and item.prov:
-                            for p in item.prov: page_nos.add(p.page_no)
-                
-                headings = getattr(chunk.meta, 'headings', [])
-                
-                meta = DocumentMetadata(
-                    pages=sorted(list(page_nos)),
-                    total_pages=total_pages,
-                    headings=headings,
-                    breadcrumb=" > ".join(headings) if headings else "General",
-                    is_table=is_tab,
-                    char_count=len(chunk.text),
-                    strategy=self.strategy,
-                    source_name=pdf_path.name,
-                    doc_title=title,
-                    doc_author=author
-                )
-                
-                chunks_data.append(Chunk(chunk_id=i+1, text=chunk.text, metadata=meta).model_dump())
+                logger.info(f"Chunking complete. Total chunks: {len(chunks_data)}")
+
+            except Exception as ce:
+                logger.error(f"Error during chunking: {ce}")
+                st.session_state.session_logs.append(f"WARNING: Chunking failed for {pdf_path.name}: {ce}")
+                # We still try to save whatever we have or proceed to return partial success if appropriate
+                # But here we'll re-raise if no chunks at all
+                if not chunks_data: raise ce
 
             with open(job_dir / "chunks.json", "w", encoding="utf-8") as f:
                 json.dump(chunks_data, f, indent=2, ensure_ascii=False, default=str)
+            logger.info(f"Saved {len(chunks_data)} chunks to chunks.json")
 
             return IngestionResult(
                 job_id=job_id, pdf_name=pdf_path.name, output_path=str(job_dir),
                 total_chunks=len(chunks_data), duration_seconds=round(time.time()-start_time, 2)
             )
+
+        except Exception as e:
+            logger.error(f"Ingestion process failed: {e}")
+            raise
 
         finally:
             if 'conv_res' in locals(): del conv_res

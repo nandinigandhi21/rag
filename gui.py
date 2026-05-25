@@ -1,14 +1,106 @@
 import streamlit as st
 import os
+import threading
+import queue
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Any
 
 # Core Engine Imports
 from config import config
+config.setup_logging()
+
 from schema import IngestionResult, SearchResult
 from ingestion_engine import IngestionEngine
 from vector_engine import VectorEngine
 from generation_engine import GenerationEngine, RAGOrchestrator
+
+# --- JOB MANAGEMENT (ASYNC ENGINE) ---
+class JobManager:
+    def __init__(self):
+        self.jobs: Dict[str, Dict[str, Any]] = {}
+        self.lock = threading.Lock()
+
+    def create_job(self, name: str) -> str:
+        job_id = f"JOB_{datetime.now().strftime('%H%M%S')}_{name[:10]}"
+        with self.lock:
+            self.jobs[job_id] = {
+                "name": name,
+                "status": "Initializing",
+                "progress": 0.0,
+                "logs": [],
+                "result": None,
+                "start_time": datetime.now()
+            }
+        return job_id
+
+    def update_job(self, job_id: str, status: str = None, progress: float = None, log: str = None, result: Any = None):
+        with self.lock:
+            if job_id in self.jobs:
+                if status: self.jobs[job_id]["status"] = status
+                if progress is not None: self.jobs[job_id]["progress"] = progress
+                if log: self.jobs[job_id]["logs"].append(log)
+                if result: 
+                    self.jobs[job_id]["result"] = result
+                    self.jobs[job_id]["status"] = "Completed"
+
+    def get_job(self, job_id: str):
+        with self.lock:
+            return self.jobs.get(job_id)
+
+@st.cache_resource
+def get_job_manager():
+    return JobManager()
+
+# --- ENGINE PROVIDER ---
+@st.cache_resource
+def initialize_system():
+    try:
+        ve = VectorEngine()
+        ge = GenerationEngine()
+        return ve, ge, RAGOrchestrator(ve, ge)
+    except Exception as e:
+        st.error(f"System Initialization Failure: {e}")
+        return None, None, None
+
+# --- BACKGROUND WORKER ---
+def background_worker(job_id: str, files: list, config_params: dict):
+    jm = get_job_manager()
+    target_path = config_params['target_path']
+    
+    # 1. Initialize Ingestion Engine
+    ie = IngestionEngine(
+        use_ocr=config_params['use_ocr'], 
+        use_formula=config_params['use_formula'], 
+        chunking_strategy=config_params['seg_strategy'], 
+        table_mode=config_params['extract_mode'],
+        max_tokens=config_params['chunk_val']
+    )
+    
+    # 2. Sequential Process
+    results_batch = []
+    for idx, f in enumerate(files):
+        fname = Path(f).name
+        jm.update_job(job_id, status=f"Processing {fname}", progress=(idx / len(files)))
+        
+        try:
+            # Extraction
+            res = ie.process(f, output_root=target_path, skip_start=config_params['skip_head'], skip_end=config_params['skip_tail'])
+            results_batch.append(res.output_path)
+            jm.update_job(job_id, log=f"SUCCESS: Extracted {res.total_chunks} segments from {fname}")
+            
+            # Indexing (needs engines)
+            if config_params['run_indexing']:
+                jm.update_job(job_id, status=f"Indexing {fname}...")
+                ve = VectorEngine() # Local instance for thread safety
+                ve.add_processed_folder(res.output_path)
+                jm.update_job(job_id, log=f"SUCCESS: Indexed metadata for {fname}")
+                ve.unload()
+                
+        except Exception as e:
+            jm.update_job(job_id, log=f"FAILURE: {fname} - {str(e)}")
+            
+    jm.update_job(job_id, status="Completed", progress=1.0, result=results_batch)
 
 # --- ARCHITECTURAL STYLING ---
 st.set_page_config(
@@ -110,6 +202,24 @@ if nav_choice == "Process Center":
     st.header("Document Processing Center")
     st.markdown("Automate the transformation of unstructured documents into searchable knowledge assets.")
     
+    jm = get_job_manager()
+    
+    # --- ACTIVE TASK MONITOR (NEW) ---
+    active_jobs = [jid for jid, info in jm.jobs.items() if info["status"] != "Completed"]
+    if active_jobs:
+        with st.container(border=True):
+            st.subheader("📡 Active Extraction Tasks")
+            for jid in active_jobs:
+                job = jm.get_job(jid)
+                col1, col2 = st.columns([3, 1])
+                col1.write(f"**Job:** {job['name']}")
+                col2.write(f"`{job['status']}`")
+                st.progress(job["progress"])
+                with st.expander(f"Task Audit Log ({jid})"):
+                    for l in job["logs"]:
+                        st.caption(l)
+        st.divider()
+
     with st.container(border=True):
         c1, c2 = st.columns([2, 1])
         with c1:
@@ -136,52 +246,49 @@ if nav_choice == "Process Center":
     with t3:
         extract_mode = st.selectbox("Extraction Fidelity", ["accurate", "fast"], index=0 if theme_accurate else 1)
 
-    if st.button("Execute Workflow", type="primary", use_container_width=True):
+    if st.button("Execute Async Workflow", type="primary", use_container_width=True):
         if not source_path or not os.path.exists(source_path):
             st.error("Operation Aborted: Valid source path required.")
         else:
-            p_bar = st.progress(0)
-            status = st.empty()
-            
             # Preparation
             files = [str(f) for f in Path(source_path).glob("*.pdf")] if os.path.isdir(source_path) else ([source_path] if source_path.endswith(".pdf") else [])
             
             if not files:
                 st.warning("Notification: No valid documents identified.")
             else:
-                ie = IngestionEngine(
-                    use_ocr=ocr_enabled, use_formula=formula_enabled, 
-                    chunking_strategy=seg_strategy.split()[0], table_mode=extract_mode,
-                    max_tokens=chunk_val, overlap=overlap_val
-                )
-                
-                results_batch = []
-                for idx, f in enumerate(files):
-                    status.info(f"Analyzing {idx+1}/{len(files)}: {Path(f).name}")
-                    try:
-                        if run_extraction:
-                            res = ie.process(f, output_root=target_path, skip_start=skip_head, skip_end=skip_tail)
-                            results_batch.append(res.output_path)
-                            st.session_state.session_logs.append(f"SUCCESS: Extracted {res.total_chunks} segments from {res.pdf_name}")
-                        
-                        if run_indexing:
-                            ve, _, _ = initialize_system()
-                            path_to_index = results_batch[-1] if run_extraction else source_path
-                            ve.add_processed_folder(path_to_index)
-                            st.session_state.session_logs.append(f"SUCCESS: Indexed metadata for {Path(f).name}")
-                            
-                    except Exception as e:
-                        st.session_state.session_logs.append(f"FAILURE: {Path(f).name} - {str(e)}")
-                    
-                    p_bar.progress((idx + 1) / len(files))
-                
-                status.success("Workflow Execution Finalized.")
-                st.balloons()
+                # --- RAM OPTIMIZATION: Unload search engines ---
+                ve_tmp, ge_tmp, _ = initialize_system()
+                if ge_tmp: ge_tmp.unload()
+                if ve_tmp: ve_tmp.unload()
 
-    if st.session_state.session_logs:
-        with st.expander("Operational Audit Log", expanded=True):
-            for entry in reversed(st.session_state.session_logs):
-                st.markdown(f"<div class='log-entry'>{entry}</div>", unsafe_allow_html=True)
+                # --- JOB SUBMISSION ---
+                job_id = jm.create_job(Path(files[0]).name if len(files)==1 else f"Batch ({len(files)} files)")
+                
+                config_params = {
+                    "target_path": target_path,
+                    "use_ocr": ocr_enabled,
+                    "use_formula": formula_enabled,
+                    "seg_strategy": seg_strategy.split()[0].lower(),
+                    "extract_mode": extract_mode,
+                    "chunk_val": chunk_val,
+                    "skip_head": skip_head,
+                    "skip_tail": skip_tail,
+                    "run_indexing": run_indexing
+                }
+
+                # Launch background thread
+                thread = threading.Thread(target=background_worker, args=(job_id, files, config_params))
+                thread.start()
+                
+                st.success(f"Workflow Dispatched: Job ID {job_id} is running in the background.")
+                st.info("You can now navigate to the Research Lab or System Status while processing continues.")
+
+    # Show completed job logs
+    completed_jobs = [info for jid, info in jm.jobs.items() if info["status"] == "Completed"]
+    if completed_jobs:
+        with st.expander("Historical Job Registry", expanded=False):
+            for job in reversed(completed_jobs):
+                st.write(f"✅ **{job['name']}** | {len(job['logs'])} Events | Finished at {datetime.now().strftime('%H:%M:%S')}")
 
 # 2. RESEARCH LAB (Chat Interface)
 elif nav_choice == "Research Lab":
@@ -189,6 +296,9 @@ elif nav_choice == "Research Lab":
     st.markdown("Engage with your data through natural language search and synthesis.")
     
     ve, ge, orch = initialize_system()
+    
+    # Ensure Vector Engine is loaded to check the count accurately
+    if ve: ve.load()
     
     if not ve or ve.collection.count() == 0:
         st.warning("System Readiness: Knowledge base is currently empty. Please process documents in the Center first.")
@@ -268,7 +378,11 @@ elif nav_choice == "System Status":
         st.divider()
         st.subheader("Data Integrity")
         ve, _, _ = initialize_system()
-        st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
+        if ve:
+            st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
+        else:
+            st.metric("Indexed Knowledge Assets", "Unavailable")
+            st.caption("Error: Vector Engine failed to initialize.")
         
     with c2:
         st.subheader("Environment Configuration")
@@ -277,6 +391,21 @@ Base Directory: {config.BASE_DIR}
 Model Repository: {config.MODELS_CACHE.name}
 Database Engine: ChromaDB (Persistent)
         """)
+        
+    st.divider()
+    st.subheader("Live Intelligence Trace")
+    st.caption("Real-time telemetry from the underlying engines and models.")
+    try:
+        if os.path.exists(config.LOG_FILE):
+            with open(config.LOG_FILE, "r", encoding="utf-8") as f:
+                # Read last 50 lines for the live trace
+                lines = f.readlines()
+                trace_content = "".join(lines[-50:])
+                st.code(trace_content, language="text", line_numbers=False)
+        else:
+            st.info("System Trace: Log file initialized but empty.")
+    except Exception as e:
+        st.error(f"Trace Retrieval Error: {e}")
 
 st.divider()
 st.caption(f"Zenith Vault Framework | {datetime.now().strftime('%Y-%m-%d')} | Authentication: Offline Local")

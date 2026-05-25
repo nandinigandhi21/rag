@@ -1,6 +1,7 @@
 import os
 import torch
 import logging
+import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Iterator
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
@@ -13,13 +14,21 @@ logger = logging.getLogger("GenerationEngine")
 
 class GenerationEngine:
     """
-    Production-grade Generation Engine with Cited Answers.
+    Production-grade Generation Engine with Cited Answers and JIT Loading.
     """
     def __init__(self, model_path: Optional[Path] = None):
         config.setup_environment()
         self.model_dir = self._resolve_path(model_path or config.LLM_MODEL_PATH)
-        
-        logger.info(f"Loading LLM from: {self.model_dir}")
+        self.model = None
+        self.tokenizer = None
+        logger.info(f"GenerationEngine initialized (Deferred loading for {self.model_dir})")
+
+    def load(self):
+        """Loads the LLM into memory only when needed."""
+        if self.model is not None:
+            return
+
+        logger.info(f"JIT Loading LLM from: {self.model_dir}")
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, local_files_only=True)
             
@@ -37,6 +46,25 @@ class GenerationEngine:
             logger.error(f"LLM Load Error: {e}")
             raise
 
+    def unload(self):
+        """Purges the LLM from memory to free up RAM/VRAM."""
+        if self.model is None:
+            return
+            
+        logger.info("Unloading LLM to free resources...")
+        try:
+            del self.model
+            del self.tokenizer
+            self.model = None
+            self.tokenizer = None
+            
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info("LLM purged from memory.")
+        except Exception as e:
+            logger.warning(f"Error during LLM unload: {e}")
+
     def _resolve_path(self, path: Path) -> str:
         if path.name == "snapshots":
             snaps = list(path.iterdir())
@@ -45,8 +73,10 @@ class GenerationEngine:
 
     def generate_stream(self, query: str, context: str, max_new_tokens: int = 1024) -> Iterator[str]:
         """
-        Generates a streaming response with citations.
+        Generates a streaming response with citations, loading the model if necessary.
         """
+        self.load() # Ensure model is in memory
+        
         # --- CITED ANSWER PROMPT ---
         system_prompt = (
             "You are a professional research assistant. Your goal is to answer questions using the provided context. "
