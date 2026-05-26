@@ -280,11 +280,24 @@ if nav_choice == "Process Center":
                 thread = threading.Thread(target=background_worker, args=(job_id, files, config_params))
                 thread.start()
                 
-                st.success(f"Workflow Dispatched: Job ID {job_id} is running in the background.")
-                st.info("You can now navigate to the Research Lab or System Status while processing continues.")
+                st.session_state.last_job_id = job_id
+                st.rerun()
+
+    # Show active job progress or success
+    if "last_job_id" in st.session_state:
+        job = jm.get_job(st.session_state.last_job_id)
+        if job:
+            if job["status"] != "Completed":
+                st.info(f"⏳ **Extraction in Progress:** {job['name']} ({job['status']})")
+                st.progress(job["progress"])
+            else:
+                st.success(f"✅ **Success:** {job['name']} has been processed and indexed.")
+                if st.button("Start New Job"):
+                    del st.session_state.last_job_id
+                    st.rerun()
 
     # Show completed job logs
-    completed_jobs = [info for jid, info in jm.jobs.items() if info["status"] == "Completed"]
+    completed_jobs = [info for jid, info in jm.jobs.items() if info["status"] == "Completed" and (not hasattr(st.session_state, 'last_job_id') or jid != st.session_state.last_job_id)]
     if completed_jobs:
         with st.expander("Historical Job Registry", expanded=False):
             for job in reversed(completed_jobs):
