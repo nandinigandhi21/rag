@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import gc
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
@@ -33,6 +34,13 @@ class VectorEngine:
             return
 
         logger.info(f"JIT Loading Vector Models...")
+        
+        # Verify paths exist
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Embedding model path not found: {self.model_path}")
+        if not os.path.exists(self.reranker_path):
+            raise FileNotFoundError(f"Reranker model path not found: {self.reranker_path}")
+
         try:
             self.model = SentenceTransformer(self.model_path)
             self.reranker = CrossEncoder(self.reranker_path)
