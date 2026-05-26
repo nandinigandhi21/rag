@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import threading
 import queue
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any
@@ -40,7 +41,7 @@ class JobManager:
                 if status: self.jobs[job_id]["status"] = status
                 if progress is not None: self.jobs[job_id]["progress"] = progress
                 if log: self.jobs[job_id]["logs"].append(log)
-                if result: 
+                if result is not None: 
                     self.jobs[job_id]["result"] = result
                     self.jobs[job_id]["status"] = "Completed"
 
@@ -161,17 +162,6 @@ if "messages" not in st.session_state:
 if "session_logs" not in st.session_state:
     st.session_state.session_logs = []
 
-# --- ENGINE PROVIDER ---
-@st.cache_resource
-def initialize_system():
-    try:
-        ve = VectorEngine()
-        ge = GenerationEngine()
-        return ve, ge, RAGOrchestrator(ve, ge)
-    except Exception as e:
-        st.error(f"System Initialization Failure: {e}")
-        return None, None, None
-
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     st.title("Zenith Vault")
@@ -204,21 +194,25 @@ if nav_choice == "Process Center":
     
     jm = get_job_manager()
     
-    # --- ACTIVE TASK MONITOR (NEW) ---
-    active_jobs = [jid for jid, info in jm.jobs.items() if info["status"] != "Completed"]
-    if active_jobs:
-        with st.container(border=True):
-            st.subheader("📡 Active Extraction Tasks")
-            for jid in active_jobs:
-                job = jm.get_job(jid)
-                col1, col2 = st.columns([3, 1])
-                col1.write(f"**Job:** {job['name']}")
-                col2.write(f"`{job['status']}`")
-                st.progress(job["progress"])
-                with st.expander(f"Task Audit Log ({jid})"):
-                    for l in job["logs"]:
-                        st.caption(l)
-        st.divider()
+    # Robust Auto-Refresh Monitor
+    if "last_job_id" in st.session_state:
+        job = jm.get_job(st.session_state.last_job_id)
+        if job:
+            status_container = st.empty()
+            with status_container.container(border=True):
+                if job["status"] == "Completed":
+                    st.success(f"✅ **Success:** {job['name']} processed and indexed successfully.")
+                    st.balloons()
+                    if st.button("Dismiss & Start New Job"):
+                        del st.session_state.last_job_id
+                        st.rerun()
+                else:
+                    st.info(f"⏳ **Extraction in Progress:** {job['name']}")
+                    st.write(f"Current Phase: `{job['status']}`")
+                    st.progress(job["progress"])
+                    st.caption("This view updates automatically as background tasks complete.")
+                    time.sleep(2)
+                    st.rerun()
 
     with st.container(border=True):
         c1, c2 = st.columns([2, 1])
@@ -250,58 +244,21 @@ if nav_choice == "Process Center":
         if not source_path or not os.path.exists(source_path):
             st.error("Operation Aborted: Valid source path required.")
         else:
-            # Preparation
             files = [str(f) for f in Path(source_path).glob("*.pdf")] if os.path.isdir(source_path) else ([source_path] if source_path.endswith(".pdf") else [])
-            
             if not files:
                 st.warning("Notification: No valid documents identified.")
             else:
-                # --- RAM OPTIMIZATION: Unload search engines ---
-                ve_tmp, ge_tmp, _ = initialize_system()
-                if ge_tmp: ge_tmp.unload()
-                if ve_tmp: ve_tmp.unload()
-
-                # --- JOB SUBMISSION ---
+                # submission
                 job_id = jm.create_job(Path(files[0]).name if len(files)==1 else f"Batch ({len(files)} files)")
-                
                 config_params = {
-                    "target_path": target_path,
-                    "use_ocr": ocr_enabled,
-                    "use_formula": formula_enabled,
-                    "seg_strategy": seg_strategy.split()[0].lower(),
-                    "extract_mode": extract_mode,
-                    "chunk_val": chunk_val,
-                    "skip_head": skip_head,
-                    "skip_tail": skip_tail,
-                    "run_indexing": run_indexing
+                    "target_path": target_path, "use_ocr": ocr_enabled, "use_formula": formula_enabled,
+                    "seg_strategy": seg_strategy.split()[0].lower(), "extract_mode": extract_mode,
+                    "chunk_val": chunk_val, "skip_head": skip_head, "skip_tail": skip_tail, "run_indexing": run_indexing
                 }
-
-                # Launch background thread
                 thread = threading.Thread(target=background_worker, args=(job_id, files, config_params))
                 thread.start()
-                
                 st.session_state.last_job_id = job_id
                 st.rerun()
-
-    # Show active job progress or success
-    if "last_job_id" in st.session_state:
-        job = jm.get_job(st.session_state.last_job_id)
-        if job:
-            if job["status"] != "Completed":
-                st.info(f"⏳ **Extraction in Progress:** {job['name']} ({job['status']})")
-                st.progress(job["progress"])
-            else:
-                st.success(f"✅ **Success:** {job['name']} has been processed and indexed.")
-                if st.button("Start New Job"):
-                    del st.session_state.last_job_id
-                    st.rerun()
-
-    # Show completed job logs
-    completed_jobs = [info for jid, info in jm.jobs.items() if info["status"] == "Completed" and (not hasattr(st.session_state, 'last_job_id') or jid != st.session_state.last_job_id)]
-    if completed_jobs:
-        with st.expander("Historical Job Registry", expanded=False):
-            for job in reversed(completed_jobs):
-                st.write(f"✅ **{job['name']}** | {len(job['logs'])} Events | Finished at {datetime.now().strftime('%H:%M:%S')}")
 
 # 2. RESEARCH LAB (Chat Interface)
 elif nav_choice == "Research Lab":
@@ -309,116 +266,48 @@ elif nav_choice == "Research Lab":
     st.markdown("Engage with your data through natural language search and synthesis.")
     
     ve, ge, orch = initialize_system()
-    
-    # Ensure Vector Engine is loaded to check the count accurately
     if ve: ve.load()
     
     if not ve or ve.collection.count() == 0:
-        st.warning("System Readiness: Knowledge base is currently empty. Please process documents in the Center first.")
+        st.warning("System Readiness: Knowledge base is currently empty.")
         st.stop()
 
-    # Chat Container
     chat_container = st.container(height=500, border=False)
     with chat_container:
         for m in st.session_state.messages:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
-                if "citations" in m:
-                    with st.expander("Validation Details"):
-                        for c in m["citations"]:
-                            st.markdown(f"""
-                            <div class="citation-card">
-                                <div class="citation-header">
-                                    <span>Source: {c.metadata.get('pdf_name')}</span>
-                                    <span>P. {c.metadata.get('pages')}</span>
-                                </div>
-                                <div class="citation-text">
-                                    <b>{c.metadata.get('breadcrumb')}</b><br/>
-                                    <i>"{c.text[:350]}..."</i>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
 
     if q := st.chat_input("Input inquiry..."):
         st.session_state.messages.append({"role": "user", "content": q})
         with chat_container:
             with st.chat_message("user"): st.markdown(q)
-            
             with st.chat_message("assistant"):
                 placeholder = st.empty()
                 full_text = ""
                 hits = []
-                
                 stream = orch.query_stream(q, top_k=5)
                 for chunk in stream:
                     if chunk["type"] == "sources": hits = chunk["content"]
                     elif chunk["type"] == "answer_chunk":
                         full_text += chunk["content"]
                         placeholder.markdown(full_text + "▌")
-                
                 placeholder.markdown(full_text)
-                
-                if hits:
-                    with st.expander("Validation Details", expanded=False):
-                        for c in hits:
-                            st.markdown(f"""
-                            <div class="citation-card">
-                                <div class="citation-header">
-                                    <span>Source: {c.metadata.get('pdf_name')}</span>
-                                    <span>P. {c.metadata.get('pages')}</span>
-                                </div>
-                                <div class="citation-text">
-                                    <b>{c.metadata.get('breadcrumb')}</b><br/>
-                                    <i>"{c.text[:350]}..."</i>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                
-                st.session_state.messages.append({"role": "assistant", "content": full_text, "citations": hits})
+                st.session_state.messages.append({"role": "assistant", "content": full_text})
 
 # 3. SYSTEM STATUS
 elif nav_choice == "System Status":
     st.header("Infrastructure & Health")
-    
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Resource Utilization")
         import torch
         st.metric("Computation Engine", "CUDA (GPU)" if torch.cuda.is_available() else "Standard (CPU)")
-        if torch.cuda.is_available():
-            st.caption(f"Accelerator: {torch.cuda.get_device_name(0)}")
-        
-        st.divider()
-        st.subheader("Data Integrity")
         ve, _, _ = initialize_system()
-        if ve:
-            st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
-        else:
-            st.metric("Indexed Knowledge Assets", "Unavailable")
-            st.caption("Error: Vector Engine failed to initialize.")
-        
+        if ve: st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
     with c2:
         st.subheader("Environment Configuration")
-        st.code(f"""
-Base Directory: {config.BASE_DIR}
-Model Repository: {config.MODELS_CACHE.name}
-Database Engine: ChromaDB (Persistent)
-        """)
-        
-    st.divider()
-    st.subheader("Live Intelligence Trace")
-    st.caption("Real-time telemetry from the underlying engines and models.")
-    try:
-        if os.path.exists(config.LOG_FILE):
-            with open(config.LOG_FILE, "r", encoding="utf-8") as f:
-                # Read last 50 lines for the live trace
-                lines = f.readlines()
-                trace_content = "".join(lines[-50:])
-                st.code(trace_content, language="text", line_numbers=False)
-        else:
-            st.info("System Trace: Log file initialized but empty.")
-    except Exception as e:
-        st.error(f"Trace Retrieval Error: {e}")
+        st.code(f"Base Directory: {config.BASE_DIR}\nModel Cache: {config.MODELS_CACHE}")
 
 st.divider()
-st.caption(f"Zenith Vault Framework | {datetime.now().strftime('%Y-%m-%d')} | Authentication: Offline Local")
+st.caption(f"Zenith Vault Framework | {datetime.now().strftime('%Y-%m-%d')}")
