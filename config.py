@@ -38,6 +38,10 @@ class AppConfig(BaseSettings):
 
     def setup_logging(self):
         """Configures centralized logging to both console and a file."""
+        logger = logging.getLogger()
+        if logger.handlers:
+            return # Already initialized
+
         log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         logging.basicConfig(
             level=logging.INFO,
