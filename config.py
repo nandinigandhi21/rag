@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,7 +17,7 @@ class AppConfig(BaseSettings):
     EMBEDDING_MODEL_PATH: Path = MODELS_CACHE / "bge-base-en-v1.5"
     
     # --- RERANKER MODEL ---
-    RERANKER_MODEL_PATH: Path = MODELS_CACHE / "ms-marco-MiniLM-L6-v2"
+    RERANKER_MODEL_PATH: Path = MODELS_CACHE / "ms-macro-MiniLM-L6-v2"
     
     # --- GENERATION MODEL ---
     # Defaulting to Qwen 3B
