@@ -5,7 +5,7 @@ import queue
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Core Engine Imports
 from config import config
@@ -55,10 +55,16 @@ def get_job_manager():
 
 # --- ENGINE PROVIDER ---
 @st.cache_resource
-def initialize_system():
+def initialize_system(llm_model: str, embed_model: str):
     try:
-        ve = VectorEngine()
+        # Update config temporarily for the engines
+        config.OLLAMA_LLM_MODEL = llm_model
+        config.OLLAMA_EMBED_MODEL = embed_model
+        
+        ve = VectorEngine(embed_model=embed_model)
         ge = GenerationEngine()
+        ge.model_name = llm_model # Override
+        
         return ve, ge, RAGOrchestrator(ve, ge)
     except Exception as e:
         st.error(f"System Initialization Failure: {e}")
@@ -93,7 +99,8 @@ def background_worker(job_id: str, files: list, config_params: dict):
             # Indexing (needs engines)
             if config_params['run_indexing']:
                 jm.update_job(job_id, status=f"Indexing {fname}...")
-                ve = VectorEngine() # Local instance for thread safety
+                # Ensure we use the selected embed model from config
+                ve = VectorEngine(embed_model=config_params['embed_model'])
                 ve.add_processed_folder(res.output_path)
                 jm.update_job(job_id, log=f"SUCCESS: Indexed metadata for {fname}")
                 ve.unload()
@@ -171,6 +178,26 @@ with st.sidebar:
     nav_choice = st.radio("Management", ["Process Center", "Research Lab", "System Status"], label_visibility="collapsed")
     
     st.divider()
+    st.subheader("Ollama Model Management")
+    
+    # Helper to fetch models for selection
+    temp_ge = GenerationEngine()
+    available_models = temp_ge.list_models()
+    
+    if available_models:
+        # Chat Model Selection
+        default_llm = config.OLLAMA_LLM_MODEL if config.OLLAMA_LLM_MODEL in available_models else available_models[0]
+        selected_llm = st.selectbox("Chat Model", available_models, index=available_models.index(default_llm))
+        
+        # Embedding Model Selection
+        default_embed = config.OLLAMA_EMBED_MODEL if config.OLLAMA_EMBED_MODEL in available_models else available_models[0]
+        selected_embed = st.selectbox("Embedding Model", available_models, index=available_models.index(default_embed))
+    else:
+        st.error("No models found on Ollama server. Check connection.")
+        selected_llm = config.OLLAMA_LLM_MODEL
+        selected_embed = config.OLLAMA_EMBED_MODEL
+
+    st.divider()
     st.subheader("Workflow Scope")
     run_extraction = st.checkbox("Data Extraction", value=True)
     run_indexing = st.checkbox("Vector Indexing", value=True)
@@ -184,6 +211,9 @@ with st.sidebar:
         st.session_state.session_logs = []
         st.cache_resource.clear()
         st.rerun()
+
+# Initialize engines with selected models
+ve, ge, orch = initialize_system(selected_llm, selected_embed)
 
 # --- MAIN INTERFACE ---
 
@@ -210,7 +240,7 @@ if nav_choice == "Process Center":
                     st.info(f"⏳ **Extraction in Progress:** {job['name']}")
                     st.write(f"Current Phase: `{job['status']}`")
                     st.progress(job["progress"])
-                    st.caption("This view updates automatically as background tasks complete.")
+                    st.caption(f"Using Embedding Model: `{selected_embed}`")
                     time.sleep(2)
                     st.rerun()
 
@@ -253,7 +283,8 @@ if nav_choice == "Process Center":
                 config_params = {
                     "target_path": target_path, "use_ocr": ocr_enabled, "use_formula": formula_enabled,
                     "seg_strategy": seg_strategy.split()[0].lower(), "extract_mode": extract_mode,
-                    "chunk_val": chunk_val, "skip_head": skip_head, "skip_tail": skip_tail, "run_indexing": run_indexing
+                    "chunk_val": chunk_val, "skip_head": skip_head, "skip_tail": skip_tail, 
+                    "run_indexing": run_indexing, "embed_model": selected_embed
                 }
                 thread = threading.Thread(target=background_worker, args=(job_id, files, config_params))
                 thread.start()
@@ -263,9 +294,8 @@ if nav_choice == "Process Center":
 # 2. RESEARCH LAB (Chat Interface)
 elif nav_choice == "Research Lab":
     st.header("Inquiry Lab")
-    st.markdown("Engage with your data through natural language search and synthesis.")
+    st.markdown(f"Engage with your data through natural language search using `{selected_llm}`.")
     
-    ve, ge, orch = initialize_system()
     if ve: ve.load()
     
     if not ve or ve.collection.count() == 0:
@@ -303,11 +333,10 @@ elif nav_choice == "System Status":
         st.subheader("Resource Utilization")
         import torch
         st.metric("Computation Engine", "CUDA (GPU)" if torch.cuda.is_available() else "Standard (CPU)")
-        ve, _, _ = initialize_system()
         if ve: st.metric("Indexed Knowledge Assets", f"{ve.collection.count()} Chunks")
     with c2:
         st.subheader("Environment Configuration")
-        st.code(f"Base Directory: {config.BASE_DIR}\nModel Cache: {config.MODELS_CACHE}")
+        st.code(f"Base Directory: {config.BASE_DIR}\nOllama Server: {config.OLLAMA_BASE_URL}\nLLM Active: {selected_llm}\nEmbed Active: {selected_embed}")
 
 st.divider()
 st.caption(f"Zenith Vault Framework | {datetime.now().strftime('%Y-%m-%d')}")

@@ -2,10 +2,11 @@ import os
 import json
 import logging
 import gc
+import requests
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import CrossEncoder
 
 from config import config
 from schema import SearchResult
@@ -14,171 +15,140 @@ logger = logging.getLogger("VectorEngine")
 
 class VectorEngine:
     """
-    Enhanced Production-grade Vector Engine with Re-ranking and JIT Loading.
+    Enhanced Vector Engine with Ollama Embeddings and Local Re-ranking.
     """
-    def __init__(self, model_path: Optional[Path] = None, db_path: Optional[Path] = None, reranker_path: Optional[Path] = None):
-        self.model_path = str(model_path or config.EMBEDDING_MODEL_PATH)
+    def __init__(self, model_path: Optional[Path] = None, db_path: Optional[Path] = None, reranker_path: Optional[Path] = None, embed_model: Optional[str] = None):
+        self.use_ollama = config.USE_OLLAMA
+        self.base_url = config.OLLAMA_BASE_URL.rstrip("/")
+        self.embed_model = embed_model or config.OLLAMA_EMBED_MODEL
+        
         self.db_path = str(db_path or config.CHROMA_DB_DIR)
         self.reranker_path = str(reranker_path or config.RERANKER_MODEL_PATH)
         
-        self.model = None
         self.reranker = None
         self.client = None
         self.collection = None
         
-        logger.info(f"VectorEngine initialized (Deferred loading for {self.model_path})")
+        logger.info(f"VectorEngine initialized (Mode: {'Ollama' if self.use_ollama else 'Local'})")
+
+    def _get_ollama_embedding(self, text: str) -> List[float]:
+        """Fetches a single embedding from Ollama."""
+        payload = {"model": self.embed_model, "prompt": text}
+        response = requests.post(f"{self.base_url}/api/embeddings", json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()["embedding"]
+
+    def _get_ollama_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Fetches multiple embeddings from Ollama."""
+        # Ollama's /api/embeddings is often single-prompt, so we loop or use their batch if supported.
+        # Standard Ollama handles one at a time via /api/embeddings.
+        embeddings = []
+        for text in texts:
+            embeddings.append(self._get_ollama_embedding(text))
+        return embeddings
 
     def load(self):
-        """Loads embedding and reranker models into memory."""
-        if self.model is not None:
+        """Loads reranker and connects to ChromaDB."""
+        if self.client is not None:
             return
 
-        logger.info(f"JIT Loading Vector Models...")
+        logger.info(f"JIT Loading Vector Infrastructure...")
         
-        # Verify paths exist
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Embedding model path not found: {self.model_path}")
-        if not os.path.exists(self.reranker_path):
-            raise FileNotFoundError(f"Reranker model path not found: {self.reranker_path}")
-
         try:
-            self.model = SentenceTransformer(self.model_path)
-            self.reranker = CrossEncoder(self.reranker_path)
+            # We keep the Reranker local for high accuracy as Ollama doesn't natively do Cross-Encoding yet
+            if os.path.exists(self.reranker_path):
+                self.reranker = CrossEncoder(self.reranker_path)
+            else:
+                logger.warning(f"Reranker path not found, proceeding without re-ranking: {self.reranker_path}")
+
             self.client = chromadb.PersistentClient(path=self.db_path)
             self.collection = self.client.get_or_create_collection(
                 name="docling_documents_enriched",
                 metadata={"hnsw:space": "cosine"}
             )
-            logger.info("Vector models loaded successfully.")
+            logger.info("Vector infrastructure loaded.")
         except Exception as e:
             logger.error(f"VectorEngine Load Error: {e}")
             raise
 
     def unload(self):
-        """Purges vector models from memory."""
-        if self.model is None:
-            return
-            
-        logger.info("Unloading Vector models...")
-        try:
-            del self.model
-            del self.reranker
-            self.model = None
-            self.reranker = None
-            gc.collect()
-            logger.info("Vector models purged.")
-        except Exception as e:
-            logger.warning(f"Error during Vector unload: {e}")
+        """Purges local models."""
+        if self.reranker is None: return
+        del self.reranker
+        self.reranker = None
+        gc.collect()
+        logger.info("Vector reranker purged.")
 
-    def add_processed_folder(self, folder_path: str, batch_size: int = 64) -> bool:
-        self.load() # Ensure models are in memory
+    def add_processed_folder(self, folder_path: str, batch_size: int = 32) -> bool:
+        self.load()
         folder = Path(folder_path)
         chunks_file = folder / "chunks.json"
         
         if not chunks_file.exists():
-            logger.warning(f"No chunks.json in {folder_path}")
             return False
 
         with open(chunks_file, "r", encoding="utf-8") as f:
             chunks_data = json.load(f)
 
-        if not chunks_data:
-            return False
+        if not chunks_data: return False
 
-        # Duplicate Check
-        test_id = f"{folder.name}_1"
-        if self.collection.get(ids=[test_id])['ids']:
-            logger.info(f"Folder '{folder.name}' already indexed.")
-            return True
-
-        logger.info(f"Indexing {len(chunks_data)} enriched chunks from {folder.name}...")
+        # Indexing
+        logger.info(f"Indexing {len(chunks_data)} chunks via Ollama Embeddings...")
 
         for i in range(0, len(chunks_data), batch_size):
             batch = chunks_data[i : i + batch_size]
-            
             documents, metadatas, ids = [], [], []
+            
             for chunk in batch:
                 documents.append(chunk["text"])
                 ids.append(f"{folder.name}_{chunk['chunk_id']}")
-                
-                # Extract meta from the enriched Chunk object
                 raw_meta = chunk["metadata"]
-                
-                # Chroma requires flat dictionaries (no lists)
                 flat_meta = {
-                    "source": folder.name,
-                    "pdf_name": raw_meta["source_name"],
+                    "source": folder.name, "pdf_name": raw_meta["source_name"],
                     "doc_title": raw_meta.get("doc_title") or "N/A",
-                    "chunk_id": chunk["chunk_id"],
-                    "pages": ", ".join(map(str, raw_meta["pages"])),
-                    "total_pages": raw_meta["total_pages"],
-                    "breadcrumb": raw_meta["breadcrumb"],
-                    "is_table": raw_meta["is_table"],
-                    "is_formula": raw_meta["is_formula"],
-                    "char_count": raw_meta["char_count"]
+                    "chunk_id": chunk["chunk_id"], "pages": ", ".join(map(str, raw_meta["pages"])),
+                    "breadcrumb": raw_meta["breadcrumb"], "is_table": raw_meta["is_table"]
                 }
                 metadatas.append(flat_meta)
 
-            embeddings = self.model.encode(documents, show_progress_bar=False).tolist()
-            self.collection.add(
-                embeddings=embeddings,
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
-            )
+            embeddings = self._get_ollama_embeddings_batch(documents)
+            self.collection.add(embeddings=embeddings, documents=documents, metadatas=metadatas, ids=ids)
             
-        logger.info(f"Successfully indexed enriched folder '{folder.name}'.")
         return True
 
     def search(self, query: str, top_k: int = 5) -> List[SearchResult]:
-        self.load() # Ensure models are in memory
-        logger.info(f"Two-Stage Retrieval (Vector + Re-ranker): '{query}'")
+        self.load()
+        logger.info(f"Ollama-Retrieval: '{query}'")
         
-        # --- STAGE 1: VECTOR RETRIEVAL ---
-        # We retrieve 4x the requested top_k to give the re-ranker enough candidates
-        candidate_count = top_k * 4
-        query_embedding = self.model.encode([query]).tolist()
+        query_embedding = self._get_ollama_embedding(query)
         
-        results = self.collection.query(
-            query_embeddings=query_embedding,
-            n_results=candidate_count
-        )
+        candidate_count = top_k * 4 if self.reranker else top_k
+        results = self.collection.query(query_embeddings=[query_embedding], n_results=candidate_count)
         
-        if not results['ids'] or not results['ids'][0]:
-            return []
+        if not results['ids'] or not results['ids'][0]: return []
 
-        # --- STAGE 2: CROSS-ENCODER RE-RANKING ---
         candidates = []
         for i in range(len(results['ids'][0])):
             candidates.append({
                 "id": results['ids'][0][i],
                 "text": results['documents'][0][i],
-                "metadata": results['metadatas'][0][i]
+                "metadata": results['metadatas'][0][i],
+                "score": results['distances'][0][i] if 'distances' in results else 0
             })
 
-        # Prepare pairs for re-ranking: [Query, Document Text]
-        pairs = [[query, c["text"]] for c in candidates]
-        
-        # Get relevance scores from the Cross-Encoder
-        # The scores are logits; higher is more relevant
-        rerank_scores = self.reranker.predict(pairs)
-        
-        # Attach scores to candidates
-        for i, score in enumerate(rerank_scores):
-            candidates[i]["rerank_score"] = float(score)
+        if self.reranker:
+            pairs = [[query, c["text"]] for c in candidates]
+            rerank_scores = self.reranker.predict(pairs)
+            for i, score in enumerate(rerank_scores):
+                candidates[i]["rerank_score"] = float(score)
+            ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+        else:
+            ranked = candidates
 
-        # Sort by the new re-ranker score (descending)
-        ranked_candidates = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-
-        # Take the top_k best results
         final_hits = []
-        for c in ranked_candidates[:top_k]:
+        for c in ranked[:top_k]:
             final_hits.append(SearchResult(
-                id=c["id"],
-                score=round(c["rerank_score"], 4),
-                text=c["text"],
-                metadata=c["metadata"]
+                id=c["id"], text=c["text"], metadata=c["metadata"],
+                score=round(c.get("rerank_score", c["score"]), 4)
             ))
-            
-        logger.info(f"Re-ranking complete. Best score: {final_hits[0].score if final_hits else 'N/A'}")
         return final_hits

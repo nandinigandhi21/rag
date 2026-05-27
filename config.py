@@ -31,6 +31,11 @@ class AppConfig(BaseSettings):
     
     # --- APP SETTINGS ---
     OFFLINE_MODE: bool = True
+    USE_OLLAMA: bool = True  # Toggle this to True to use the server
+    OLLAMA_BASE_URL: str = "http://localhost:11434" # Change to your server IP and Port
+    OLLAMA_LLM_MODEL: str = "qwen2.5:3b"
+    OLLAMA_EMBED_MODEL: str = "bge-m3" # Or your preferred embedding model
+    
     DEBUG: bool = False
     LOG_FILE: Path = BASE_DIR / "app.log"
     

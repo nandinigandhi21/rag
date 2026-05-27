@@ -4,7 +4,6 @@ import json
 import logging
 import gc
 import fitz
-import streamlit as st
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -172,7 +171,6 @@ class IngestionEngine:
 
             except Exception as ce:
                 logger.error(f"Error during chunking: {ce}")
-                st.session_state.session_logs.append(f"WARNING: Chunking failed for {pdf_path.name}: {ce}")
                 # We still try to save whatever we have or proceed to return partial success if appropriate
                 # But here we'll re-raise if no chunks at all
                 if not chunks_data: raise ce
