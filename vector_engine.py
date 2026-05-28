@@ -17,24 +17,25 @@ class VectorEngine:
     """
     Enhanced Vector Engine with Ollama Embeddings and Local Re-ranking.
     """
-    def __init__(self, model_path: Optional[Path] = None, db_path: Optional[Path] = None, reranker_path: Optional[Path] = None, embed_model: Optional[str] = None):
+    def __init__(self, model_path: Optional[Path] = None, db_path: Optional[Path] = None, reranker_path: Optional[Path] = None, embed_model: Optional[str] = None, collection_name: str = "docling_documents_enriched"):
         self.use_ollama = config.USE_OLLAMA
         self.base_url = config.OLLAMA_BASE_URL.rstrip("/")
         self.embed_model = embed_model or config.OLLAMA_EMBED_MODEL
         
         self.db_path = str(db_path or config.CHROMA_DB_DIR)
         self.reranker_path = str(reranker_path or config.RERANKER_MODEL_PATH)
+        self.collection_name = collection_name
         
         self.reranker = None
         self.client = None
         self.collection = None
         
-        logger.info(f"VectorEngine initialized (Mode: {'Ollama' if self.use_ollama else 'Local'})")
+        logger.info(f"VectorEngine initialized (Mode: {'Ollama' if self.use_ollama else 'Local'}, Collection: {self.collection_name})")
 
     def _get_ollama_embedding(self, text: str) -> List[float]:
         """Fetches a single embedding from Ollama."""
         payload = {"model": self.embed_model, "prompt": text}
-        response = requests.post(f"{self.base_url}/api/embeddings", json=payload, timeout=30)
+        response = requests.post(f"{self.base_url}/api/embeddings", json=payload, timeout=300)
         response.raise_for_status()
         return response.json()["embedding"]
 
@@ -47,26 +48,35 @@ class VectorEngine:
             embeddings.append(self._get_ollama_embedding(text))
         return embeddings
 
+    def list_collections(self) -> List[str]:
+        """Returns a list of all collections in the database."""
+        if self.client is None:
+            self.client = chromadb.PersistentClient(path=self.db_path)
+        return [c.name for c in self.client.list_collections()]
+
     def load(self):
         """Loads reranker and connects to ChromaDB."""
-        if self.client is not None:
+        if self.client is not None and self.collection is not None:
             return
 
-        logger.info(f"JIT Loading Vector Infrastructure...")
+        logger.info(f"JIT Loading Vector Infrastructure for {self.collection_name}...")
         
         try:
             # We keep the Reranker local for high accuracy as Ollama doesn't natively do Cross-Encoding yet
-            if os.path.exists(self.reranker_path):
-                self.reranker = CrossEncoder(self.reranker_path)
-            else:
-                logger.warning(f"Reranker path not found, proceeding without re-ranking: {self.reranker_path}")
+            if self.reranker is None:
+                if os.path.exists(self.reranker_path):
+                    self.reranker = CrossEncoder(self.reranker_path)
+                else:
+                    logger.warning(f"Reranker path not found, proceeding without re-ranking: {self.reranker_path}")
 
-            self.client = chromadb.PersistentClient(path=self.db_path)
+            if self.client is None:
+                self.client = chromadb.PersistentClient(path=self.db_path)
+            
             self.collection = self.client.get_or_create_collection(
-                name="docling_documents_enriched",
+                name=self.collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
-            logger.info("Vector infrastructure loaded.")
+            logger.info(f"Vector infrastructure loaded for collection: {self.collection_name}")
         except Exception as e:
             logger.error(f"VectorEngine Load Error: {e}")
             raise
@@ -147,8 +157,14 @@ class VectorEngine:
 
         final_hits = []
         for c in ranked[:top_k]:
+            # Normalize score: higher is better
+            # If reranked, score is already higher-is-better (logits/probs)
+            # If not reranked, c['score'] is cosine distance (0 to 2, lower is better)
+            # We convert distance to relevance: 1.0 - distance
+            relevance = c.get("rerank_score", 1.0 - c["score"])
+            
             final_hits.append(SearchResult(
                 id=c["id"], text=c["text"], metadata=c["metadata"],
-                score=round(c.get("rerank_score", c["score"]), 4)
+                score=round(float(relevance), 4)
             ))
         return final_hits

@@ -83,7 +83,7 @@ class GenerationEngine:
                 f"{self.base_url}/api/chat",
                 json=payload,
                 stream=True,
-                timeout=60
+                timeout=300
             )
             response.raise_for_status()
             
@@ -100,32 +100,45 @@ class GenerationEngine:
 
 class RAGOrchestrator:
     """
-    Coordinates Retrieval and Generation with Metadata-rich Context.
+    Coordinates Retrieval from multiple collections and Generation with Metadata-rich Context.
     """
-    def __init__(self, vector_engine, generation_engine):
-        self.ve = vector_engine
+    def __init__(self, vector_engines: List[Any], generation_engine: GenerationEngine):
+        self.ves = vector_engines # List of VectorEngine instances
         self.ge = generation_engine
 
     def query_stream(self, query: str, top_k: int = 5) -> Iterator[Dict[str, Any]]:
-        # 1. Retrieve enriched chunks
-        sources = self.ve.search(query, top_k=top_k)
-        yield {"type": "sources", "content": sources}
+        # 1. Retrieve enriched chunks from all selected engines
+        all_sources = []
+        for ve in self.ves:
+            try:
+                all_sources.extend(ve.search(query, top_k=top_k))
+            except Exception as e:
+                logger.error(f"Search failed for collection {ve.collection_name}: {e}")
         
-        # 2. Construct Rich Context
+        # 2. Global Ranking (Candidate Selection)
+        # Sort by score (Rerank score if available, otherwise distance)
+        # Higher score is better in our schema
+        ranked_sources = sorted(all_sources, key=lambda x: x.score, reverse=True)[:top_k]
+        
+        yield {"type": "sources", "content": ranked_sources}
+        
+        # 3. Construct Rich Context
         context_blocks = []
-        for i, s in enumerate(sources):
+        for i, s in enumerate(ranked_sources):
             meta = s.metadata
             breadcrumb = meta.get("breadcrumb", "General")
             page = meta.get("pages", "Unknown")
             source_file = meta.get("pdf_name", "Unknown Document")
+            col_source = meta.get("source", "Unknown Collection")
             
-            header = f"--- [Source {i+1}]: {source_file} | Section: {breadcrumb} | Page: {page} ---"
+            header = f"--- [Source {i+1}]: {source_file} (Vault: {col_source}) | Section: {breadcrumb} | Page: {page} ---"
             context_blocks.append(f"{header}\n{s.text}")
         
         full_context = "\n\n".join(context_blocks)
         
-        # 3. Stream Cited Answer
+        # 4. Stream Cited Answer
         yield {"type": "start_answer", "content": None}
         for chunk in self.ge.generate_stream(query, full_context):
             yield {"type": "answer_chunk", "content": chunk}
         yield {"type": "end_answer", "content": None}
+
