@@ -24,18 +24,37 @@ logger = logging.getLogger("IngestionEngine")
 
 class IngestionEngine:
     """
-    Optimized Ingestion Engine with Accurate Table Extraction.
+    An optimized document ingestion engine specializing in high-fidelity PDF extraction.
+    
+    This engine leverages the Docling library to convert complex PDFs into structured 
+    Markdown, with a specific focus on preserving table structures, mathematical 
+    formulas, and spatial hierarchy. It handles the full pipeline from raw PDF 
+    to searchable, metadata-rich document chunks.
+
+    Attributes:
+        strategy (str): The chunking methodology ('hybrid' or 'hierarchical').
+        pipeline_options (PdfPipelineOptions): Configuration for the Docling conversion pipeline.
+        converter (DocumentConverter): The core converter instance for PDF processing.
+        chunker (BaseChunker): The initialized chunker based on the selected strategy.
     """
     def __init__(self, use_ocr: bool = True, use_formula: bool = False, chunking_strategy: str = "hybrid", table_mode: str = "accurate", **chunker_kwargs):
+        """
+        Initializes the IngestionEngine with specific extraction and chunking parameters.
+
+        Args:
+            use_ocr (bool): Whether to use Optical Character Recognition for scanned content.
+            use_formula (bool): Whether to enable specialized formula enrichment.
+            chunking_strategy (str): The method for breaking documents into chunks ('hybrid' or 'hierarchical').
+            table_mode (str): Extraction mode for tables ('accurate' or 'fast').
+            **chunker_kwargs: Additional arguments for chunker configuration (max_tokens, merge_peers).
+        """
         self.strategy = chunking_strategy.lower()
         
         # --- ACCURATE TABLE CONFIGURATION ---
         self.pipeline_options = PdfPipelineOptions()
         
-        # Force TableFormerV2 and Accurate Mode
         self.pipeline_options.do_table_structure = True
         self.pipeline_options.table_structure_options.do_cell_matching = True
-        # Setting the threshold and mode for maximum accuracy
         self.pipeline_options.table_structure_options.mode = table_mode 
         
         self.pipeline_options.generate_picture_images = True
@@ -64,15 +83,16 @@ class IngestionEngine:
             self.chunker = HybridChunker(tokenizer=tokenizer_path, max_tokens=max_tokens, merge_peers=merge_peers)
 
     def _save_table(self, table, i, table_dir):
+        """Exports extracted tables to CSV format."""
         try:
             csv_path = table_dir / f"table_{i+1:03d}.csv"
-            # Accurate mode ensures dataframe structure is clean
             df = table.export_to_dataframe()
             df.to_csv(csv_path, index=False)
         except Exception as e:
             logger.error(f"Failed to save table {i}: {e}")
 
     def _save_image(self, element, i, img_dir):
+        """Saves extracted images to disk."""
         try:
             if element.image:
                 img_name = f"image_{i+1:03d}.png"
@@ -81,7 +101,10 @@ class IngestionEngine:
         except Exception as e:
             logger.error(f"Failed to save image {i}: {e}")
 
-    def process(self, pdf_path: str, output_root: Optional[str] = None, skip_start: int = 0, skip_end: int = 0, status_callback: Optional[Callable[[str], None]] = None) -> IngestionResult:
+    def process(self, pdf_path: str, output_root: Optional[str] = None, skip_start: int = 0, skip_end: int = 0, status_callback: Optional[Callable[[str], None]] = None, batch_size: int = 15) -> IngestionResult:
+        """
+        Executes the ingestion pipeline in batches to prevent memory exhaustion (std::bad_alloc).
+        """
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"Input PDF not found: {pdf_path}")
@@ -96,11 +119,18 @@ class IngestionEngine:
         for d in [job_dir, img_dir, table_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Processing (PDF: {pdf_path.name})")
+        logger.info(f"Processing (PDF: {pdf_path.name}) with Batch Size: {batch_size}")
         start_time = time.time()
 
+        all_chunks_data = []
+        md_path = job_dir / f"{pdf_path.stem}.md"
+        
+        # Initialize MD file
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(f"# Processed Document: {pdf_path.name}\n\n")
+
         try:
-            # 1. Doc Info
+            # 1. Determine Scope
             with fitz.open(pdf_path) as pdf_doc:
                 total_pages = len(pdf_doc)
                 doc_meta = pdf_doc.metadata
@@ -109,34 +139,33 @@ class IngestionEngine:
             
             start_p = skip_start + 1
             end_p = total_pages - skip_end
-            if start_p > end_p: end_p = total_pages # Fallback
+            if start_p > end_p: end_p = total_pages 
 
-            # 2. Convert
-            if status_callback: status_callback(f"Extracting structure from {pdf_path.name} (Pages {start_p}-{end_p})...")
-            logger.info(f"Starting conversion for {pdf_path.name}...")
-            conv_res = self.converter.convert(pdf_path, page_range=(start_p, end_p))
-            doc = conv_res.document
-            logger.info(f"Conversion complete. Extracted {len(doc.pages)} pages.")
+            # 2. Batch Processing Loop
+            for batch_start in range(start_p, end_p + 1, batch_size):
+                batch_end = min(batch_start + batch_size - 1, end_p)
+                
+                msg = f"Processing batch: Pages {batch_start}-{batch_end} of {total_pages}..."
+                if status_callback: status_callback(msg)
+                logger.info(msg)
 
-            # 3. Assets
-            logger.info("Saving tables and images (sequential to save memory)...")
-            for i, table in enumerate(doc.tables):
-                self._save_table(table, i, table_dir)
-            for i, element in enumerate(doc.pictures):
-                self._save_image(element, i, img_dir)
+                # Convert Batch
+                conv_res = self.converter.convert(pdf_path, page_range=(batch_start, batch_end))
+                doc = conv_res.document
+                
+                # Assets
+                asset_offset = len(all_chunks_data)
+                for i, table in enumerate(doc.tables):
+                    self._save_table(table, asset_offset + i, table_dir)
+                for i, element in enumerate(doc.pictures):
+                    self._save_image(element, asset_offset + i, img_dir)
 
-            # 4. Markdown
-            logger.info("Exporting to Markdown...")
-            md_path = job_dir / f"{pdf_path.stem}.md"
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(doc.export_to_markdown(image_mode=ImageRefMode.REFERENCED))
+                # Append Markdown
+                with open(md_path, "a", encoding="utf-8") as f:
+                    f.write(doc.export_to_markdown(image_mode=ImageRefMode.REFERENCED))
+                    f.write("\n\n")
 
-            # 5. Chunks
-            logger.info(f"Starting chunking with strategy: {self.strategy}...")
-            if status_callback: status_callback("Analyzing document structure and generating chunks...")
-            
-            chunks_data = []
-            try:
+                # Chunking Batch
                 for i, chunk in enumerate(self.chunker.chunk(dl_doc=doc)):
                     page_nos = set()
                     is_tab = False
@@ -161,33 +190,36 @@ class IngestionEngine:
                         doc_title=title,
                         doc_author=author
                     )
-                    
-                    chunks_data.append(Chunk(chunk_id=i+1, text=chunk.text, metadata=meta).model_dump())
-                    
-                    if (i + 1) % 100 == 0:
-                        logger.info(f"Generated {i+1} chunks...")
-                
-                logger.info(f"Chunking complete. Total chunks: {len(chunks_data)}")
 
-            except Exception as ce:
-                logger.error(f"Error during chunking: {ce}")
-                # We still try to save whatever we have or proceed to return partial success if appropriate
-                # But here we'll re-raise if no chunks at all
-                if not chunks_data: raise ce
+                    # --- CONTEXT ENRICHMENT (Context-Augmented RAG) ---
+                    # We prepend document metadata directly to the text chunk. This ensures the 
+                    # vector engine can search based on document context (like headings) 
+                    # and the LLM knows the exact provenance of every piece of info.
+                    pages_str = ", ".join(map(str, meta.pages)) if meta.pages else "N/A"
+                    context_header = f"[Source: {pdf_path.name} | Section: {meta.breadcrumb} | Page: {pages_str}]\n"
+                    enriched_text = context_header + chunk.text
+                    
+                    all_chunks_data.append(Chunk(
+                        chunk_id=len(all_chunks_data)+1, 
+                        text=enriched_text, 
+                        metadata=meta
+                    ).model_dump())
 
+                # Explicit Cleanup
+                del conv_res
+                del doc
+                gc.collect()
+
+            # 3. Final Save
             with open(job_dir / "chunks.json", "w", encoding="utf-8") as f:
-                json.dump(chunks_data, f, indent=2, ensure_ascii=False, default=str)
-            logger.info(f"Saved {len(chunks_data)} chunks to chunks.json")
+                json.dump(all_chunks_data, f, indent=2, ensure_ascii=False, default=str)
+            logger.info(f"Ingestion complete. Total chunks: {len(all_chunks_data)}")
 
             return IngestionResult(
                 job_id=job_id, pdf_name=pdf_path.name, output_path=str(job_dir),
-                total_chunks=len(chunks_data), duration_seconds=round(time.time()-start_time, 2)
+                total_chunks=len(all_chunks_data), duration_seconds=round(time.time()-start_time, 2)
             )
 
         except Exception as e:
             logger.error(f"Ingestion process failed: {e}")
             raise
-
-        finally:
-            if 'conv_res' in locals(): del conv_res
-            gc.collect()

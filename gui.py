@@ -19,11 +19,27 @@ from generation_engine import GenerationEngine, RAGOrchestrator
 
 # --- JOB MANAGEMENT (ASYNC ENGINE) ---
 class JobManager:
+    """
+    Manages background document processing tasks with thread-safe state tracking.
+    
+    The JobManager allows the UI to initiate long-running tasks (like ingestion) 
+    without blocking the main Streamlit thread. It tracks progress, logs, and 
+    final results for each job.
+    """
     def __init__(self):
         self.jobs: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
 
     def create_job(self, name: str) -> str:
+        """
+        Registers a new background job and returns a unique identifier.
+
+        Args:
+            name (str): A descriptive name for the job (e.g., filename).
+
+        Returns:
+            str: The generated unique Job ID.
+        """
         job_id = f"JOB_{datetime.now().strftime('%H%M%S')}_{name[:10]}"
         with self.lock:
             self.jobs[job_id] = {
@@ -37,6 +53,16 @@ class JobManager:
         return job_id
 
     def update_job(self, job_id: str, status: str = None, progress: float = None, log: str = None, result: Any = None):
+        """
+        Atomically updates the state of a specific job.
+
+        Args:
+            job_id (str): ID of the job to update.
+            status (str): Current execution phase.
+            progress (float): Completion percentage (0.0 to 1.0).
+            log (str): An informational message or error log.
+            result (Any): Final output data upon completion.
+        """
         with self.lock:
             if job_id in self.jobs:
                 if status: self.jobs[job_id]["status"] = status
@@ -47,16 +73,34 @@ class JobManager:
                     self.jobs[job_id]["status"] = "Completed"
 
     def get_job(self, job_id: str):
+        """
+        Retrieves the current state of a job in a thread-safe manner.
+        """
         with self.lock:
             return self.jobs.get(job_id)
 
 @st.cache_resource
 def get_job_manager():
+    """Returns a singleton instance of the JobManager across the Streamlit session."""
     return JobManager()
 
 # --- ENGINE PROVIDER ---
 @st.cache_resource
 def initialize_system(llm_model: str, embed_model: str, collection_names: List[str]):
+    """
+    Pre-initializes the RAG components based on user selection.
+    
+    This function leverages Streamlit caching to ensure that heavy engines 
+    (Vector, Generation) are only re-initialized when models or collections change.
+
+    Args:
+        llm_model (str): Name of the selected LLM.
+        embed_model (str): Name of the selected embedding model.
+        collection_names (List[str]): Domains to include in the research vault.
+
+    Returns:
+        tuple: (VectorEngines, GenerationEngine, RAGOrchestrator)
+    """
     try:
         # Update config temporarily for the engines
         config.OLLAMA_LLM_MODEL = llm_model
@@ -77,6 +121,12 @@ def initialize_system(llm_model: str, embed_model: str, collection_names: List[s
 
 # --- BACKGROUND WORKER ---
 def background_worker(job_id: str, files: list, config_params: dict):
+    """
+    The core background processing loop executed in a separate thread.
+    
+    It orchestrates the sequential ingestion and indexing of one or more documents, 
+    updating the JobManager state at each stage for UI progress tracking.
+    """
     jm = get_job_manager()
     target_path = Path(config_params['target_path'])
     
@@ -218,6 +268,12 @@ if "session_logs" not in st.session_state:
 if "nav_choice" not in st.session_state:
     st.session_state.nav_choice = "Executive Overview"
 
+@st.cache_resource
+def get_available_models():
+    """Helper to fetch models for selection without repeated initialization logs."""
+    temp_ge = GenerationEngine()
+    return temp_ge.list_models()
+
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     # Minimalist Tech Logo + Amaya Title
@@ -250,8 +306,7 @@ with st.sidebar:
     st.subheader("Model Configuration")
     
     # Helper to fetch models for selection
-    temp_ge = GenerationEngine()
-    available_models = temp_ge.list_models()
+    available_models = get_available_models()
     
     if available_models:
         selected_llm = st.selectbox("LLM Inference Model", available_models, help="Select the model for text generation.")
@@ -288,7 +343,7 @@ with st.sidebar:
     run_extraction = st.checkbox("Enable Document Extraction", value=True)
     run_indexing = st.checkbox("Enable Vector Indexing", value=True)
     
-    if st.button("Purge Session State", use_container_width=True):
+    if st.button("Purge Session State", width="stretch"):
         st.session_state.messages = []
         st.session_state.session_logs = []
         st.cache_resource.clear()
@@ -323,7 +378,7 @@ if nav_choice == "Executive Overview":
             *   Configure OCR and Table Vision.
             *   Build custom Knowledge Domains.
             """)
-            if st.button("Enter Studio", use_container_width=True, key="btn_eng"):
+            if st.button("Enter Studio", width="stretch", key="btn_eng"):
                 st.session_state.nav_choice = "Knowledge Engineering Studio"
                 st.rerun()
 
@@ -339,7 +394,7 @@ if nav_choice == "Executive Overview":
             *   Cited evidence & provenance.
             *   Neural research assistance.
             """)
-            if st.button("Initialize Research", use_container_width=True, key="btn_res"):
+            if st.button("Initialize Research", width="stretch", key="btn_res"):
                 st.session_state.nav_choice = "Cognitive Research Lab"
                 st.rerun()
 
@@ -355,7 +410,7 @@ if nav_choice == "Executive Overview":
             *   Ollama inference monitoring.
             *   Index growth & health analytics.
             """)
-            if st.button("View Telemetry", use_container_width=True, key="btn_inf"):
+            if st.button("View Telemetry", width="stretch", key="btn_inf"):
                 st.session_state.nav_choice = "Infrastructure Stats"
                 st.rerun()
 
