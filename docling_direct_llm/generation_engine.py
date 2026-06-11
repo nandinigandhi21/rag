@@ -135,52 +135,6 @@ class GenerationEngine:
             logger.error(f"Ollama Generation Error: {e}")
             yield f"\n[ERROR: Failed to communicate with Ollama server: {e}]"
 
-    def generate_direct(self, query: str, context: str, max_new_tokens: int = 2048) -> Iterator[str]:
-        """
-        Generates a streaming response for direct document analysis (No Vector DB).
-        Used when the user wants to analyze the entire document context at once.
-        """
-        system_prompt = (
-            "You are a professional document analyst. You are provided with the full text "
-            "of one or more documents. Your task is to analyze this content and answer "
-            "the user's request precisely. Since this is a direct analysis, focus on "
-            "synthesizing information across the entire provided text."
-        )
-        
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"DOCUMENT CONTENT:\n{context}\n\nUSER REQUEST: {query}"}
-            ],
-            "stream": True,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": 0.3,
-                "top_p": 0.9
-            }
-        }
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json=payload,
-                stream=True,
-                timeout=600 # Extended timeout for large context
-            )
-            response.raise_for_status()
-            
-            for line in response.iter_lines():
-                if line:
-                    chunk = json.loads(line.decode("utf-8"))
-                    if "message" in chunk and "content" in chunk["message"]:
-                        yield chunk["message"]["content"]
-                    if chunk.get("done"):
-                        break
-        except Exception as e:
-            logger.error(f"Direct Generation Error: {e}")
-            yield f"\n[ERROR: Direct Analysis Failed: {e}]"
-
 class RAGOrchestrator:
     """
     The central coordinator for the Retrieval-Augmented Generation (RAG) workflow.

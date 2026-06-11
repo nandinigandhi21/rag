@@ -3,6 +3,7 @@ import json
 import logging
 import gc
 import requests
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
@@ -140,6 +141,13 @@ class VectorEngine:
         gc.collect()
         logger.info("Vector reranker purged.")
 
+    def count(self) -> int:
+        """Returns the number of chunks in the collection."""
+        self.load()
+        if self.collection:
+            return self.collection.count()
+        return 0
+
     def add_processed_folder(self, folder_path: str, batch_size: int = 32) -> bool:
         """
         Indexes all chunks from a processed document folder into the vector database.
@@ -241,4 +249,134 @@ class VectorEngine:
                 score=round(float(relevance), 4)
             ))
         return final_hits
+
+class DirectRetrievalEngine:
+    """
+    Approach 2: Direct Retrieval Engine (No persistent vector storage).
+    
+    This engine implements a 'Just-In-Time' RAG approach by skipping the vector 
+    database entirely. It loads chunks directly from the disk, computes embeddings 
+    on-the-fly for the current query context, and performs manual cosine 
+    similarity calculation followed by re-ranking.
+    """
+    def __init__(self, folder_paths: List[str], reranker_path: Optional[Path] = None, embed_model: Optional[str] = None):
+        self.folder_paths = [Path(p) for p in folder_paths]
+        self.use_ollama = config.USE_OLLAMA
+        self.base_url = config.OLLAMA_BASE_URL.rstrip("/")
+        self.embed_model = embed_model or config.OLLAMA_EMBED_MODEL
+        self.reranker_path = str(reranker_path or config.RERANKER_MODEL_PATH)
+        
+        self.reranker = None
+        self.chunks_cache = []
+        self.collection_name = "direct_search" # For compatibility
+
+    def _get_ollama_embedding(self, text: str) -> np.ndarray:
+        payload = {"model": self.embed_model, "prompt": text}
+        response = requests.post(f"{self.base_url}/api/embeddings", json=payload, timeout=300)
+        response.raise_for_status()
+        return np.array(response.json()["embedding"])
+
+    def load(self):
+        """Loads chunks from the specified folders and initializes models."""
+        if not self.chunks_cache:
+            for folder in self.folder_paths:
+                chunks_file = folder / "chunks.json"
+                if chunks_file.exists():
+                    with open(chunks_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        for chunk in data:
+                            # Standardize metadata for SearchResult compatibility
+                            raw_meta = chunk["metadata"]
+                            flat_meta = {
+                                "source": folder.name, "pdf_name": raw_meta["source_name"],
+                                "doc_title": raw_meta.get("doc_title") or "N/A",
+                                "chunk_id": chunk["chunk_id"], "pages": ", ".join(map(str, raw_meta["pages"])),
+                                "breadcrumb": raw_meta["breadcrumb"], "is_table": raw_meta["is_table"]
+                            }
+                            chunk["flat_metadata"] = flat_meta
+                        self.chunks_cache.extend(data)
+        
+        if self.reranker is None:
+            if os.path.exists(self.reranker_path):
+                self.reranker = CrossEncoder(self.reranker_path)
+            else:
+                logger.warning("Direct Search: Reranker not found.")
+
+    def unload(self):
+        if self.reranker:
+            del self.reranker
+            self.reranker = None
+            gc.collect()
+
+    def count(self) -> int:
+        """Returns the number of loaded chunks."""
+        self.load()
+        return len(self.chunks_cache)
+
+    def search(self, query: str, top_k: int = 5) -> List[SearchResult]:
+        """
+        Performs direct search:
+        1. Embed Query.
+        2. Embed all chunks (on-the-fly).
+        3. Manual Cosine Similarity.
+        4. Rerank.
+        """
+        self.load()
+        if not self.chunks_cache: return []
+
+        logger.info(f"Direct-Retrieval (Approach 2): '{query}' on {len(self.chunks_cache)} chunks")
+        
+        # 1. Get Query Embedding
+        query_vec = self._get_ollama_embedding(query)
+        
+        # 2. Get Chunk Embeddings (Warning: This is slow without a DB)
+        # Note: In a production environment, we'd cache these or use a faster local model.
+        chunk_texts = [c["text"] for c in self.chunks_cache]
+        
+        # To avoid massive overhead, we'll embed chunks in batches
+        chunk_vecs = []
+        for text in chunk_texts:
+            chunk_vecs.append(self._get_ollama_embedding(text))
+        
+        chunk_vecs = np.array(chunk_vecs)
+        
+        # 3. Manual Cosine Similarity
+        # cosine = (A . B) / (||A|| * ||B||)
+        norm_q = np.linalg.norm(query_vec)
+        norm_c = np.linalg.norm(chunk_vecs, axis=1)
+        dots = np.dot(chunk_vecs, query_vec)
+        similarities = dots / (norm_q * norm_c)
+        
+        # 4. Get Candidates
+        candidate_count = top_k * 4 if self.reranker else top_k
+        top_indices = np.argsort(similarities)[-candidate_count:][::-1]
+        
+        candidates = []
+        for idx in top_indices:
+            candidates.append({
+                "id": str(self.chunks_cache[idx]["chunk_id"]),
+                "text": self.chunks_cache[idx]["text"],
+                "metadata": self.chunks_cache[idx]["flat_metadata"],
+                "score": float(similarities[idx])
+            })
+
+        # 5. Rerank
+        if self.reranker:
+            pairs = [[query, c["text"]] for c in candidates]
+            rerank_scores = self.reranker.predict(pairs)
+            for i, score in enumerate(rerank_scores):
+                candidates[i]["rerank_score"] = float(score)
+            ranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+        else:
+            ranked = candidates
+
+        final_hits = []
+        for c in ranked[:top_k]:
+            relevance = c.get("rerank_score", c["score"])
+            final_hits.append(SearchResult(
+                id=c["id"], text=c["text"], metadata=c["metadata"],
+                score=round(float(relevance), 4)
+            ))
+        return final_hits
+
 

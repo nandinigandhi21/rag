@@ -3,7 +3,6 @@ import os
 import threading
 import queue
 import time
-import json
 import fitz  # PyMuPDF for PDF preview
 from pathlib import Path
 from datetime import datetime
@@ -87,7 +86,7 @@ def get_job_manager():
 
 # --- ENGINE PROVIDER ---
 @st.cache_resource
-def initialize_system(llm_model: str, embed_model: str, collection_names: List[str]):
+def initialize_system(llm_model: str, embed_model: str, collection_names: List[str], strategy: str = "Vector Vault (Approach 1)", folder_paths: List[str] = None):
     """
     Pre-initializes the RAG components based on user selection.
     
@@ -97,7 +96,9 @@ def initialize_system(llm_model: str, embed_model: str, collection_names: List[s
     Args:
         llm_model (str): Name of the selected LLM.
         embed_model (str): Name of the selected embedding model.
-        collection_names (List[str]): Domains to include in the research vault.
+        collection_names (List[str]): Domains to include in the research vault (Approach 1).
+        strategy (str): The selected retrieval approach.
+        folder_paths (List[str]): Specific paths to search directly (Approach 2).
 
     Returns:
         tuple: (VectorEngines, GenerationEngine, RAGOrchestrator)
@@ -108,9 +109,18 @@ def initialize_system(llm_model: str, embed_model: str, collection_names: List[s
         config.OLLAMA_EMBED_MODEL = embed_model
         
         ves = []
-        for cname in collection_names:
-            ve = VectorEngine(embed_model=embed_model, collection_name=cname)
-            ves.append(ve)
+        if "Approach 1" in strategy:
+            for cname in collection_names:
+                ve = VectorEngine(embed_model=embed_model, collection_name=cname)
+                ves.append(ve)
+        else:
+            # Approach 2: Direct Retrieval
+            from vector_engine import DirectRetrievalEngine
+            if folder_paths:
+                ve = DirectRetrievalEngine(folder_paths=folder_paths, embed_model=embed_model)
+                ves.append(ve)
+            else:
+                st.warning("No folders selected for Direct Analysis.")
         
         ge = GenerationEngine()
         ge.model_name = llm_model # Override
@@ -158,20 +168,8 @@ def background_worker(job_id: str, files: list, config_params: dict):
             results_batch.append(res.output_path)
             jm.update_job(job_id, log=f"SUCCESS: Extracted {res.total_chunks} segments from {fname}")
             
-            # Direct LLM Mode: Aggregate text
-            if config_params.get('direct_llm', False):
-                jm.update_job(job_id, status=f"Aggregating text for {fname}...")
-                chunks_file = Path(res.output_path) / "chunks.json"
-                if chunks_file.exists():
-                    with open(chunks_file, 'r', encoding='utf-8') as f_json:
-                        chunks_data = json.load(f_json)
-                        full_text = "\n\n".join([c.get('text', '') for c in chunks_data])
-                        # Store aggregated text in the result for the UI to pick up
-                        res.metadata["aggregated_text"] = full_text
-                jm.update_job(job_id, log=f"SUCCESS: Text aggregated for {fname} (Direct LLM Mode)")
-
             # Indexing (needs engines)
-            elif config_params['run_indexing']:
+            if config_params['run_indexing']:
                 jm.update_job(job_id, status=f"Indexing {fname}...")
                 # Ensure we use the selected embed model and collection
                 ve = VectorEngine(embed_model=config_params['embed_model'], collection_name=config_params['collection_name'])
@@ -331,48 +329,60 @@ with st.sidebar:
 
     st.divider()
     if nav_choice == "Cognitive Research Lab":
-        st.subheader("Knowledge Domains")
-        temp_ve = VectorEngine(embed_model=selected_embed)
-        collections = temp_ve.list_collections()
-        if collections:
-            all_selected = st.checkbox("Select All Vaults", value=False)
-            selected_collections = []
-            with st.container(border=True):
-                for col in collections:
-                    if st.checkbox(col, value=all_selected, key=f"sel_{col}"):
-                        selected_collections.append(col)
+        st.subheader("Retrieval Strategy")
+        retrieval_strategy = st.radio("Search Methodology", ["Vector Vault (Approach 1)", "Direct Analysis (Approach 2)"], index=0)
+        
+        selected_collections = []
+        selected_folders = []
+        
+        if "Approach 2" in retrieval_strategy:
+            st.subheader("Target Assets")
+            direct_root = st.text_input("Direct Search Root", value=str(config.OUTPUT_ROOT), help="Base directory where processed job folders are stored.")
             
-            if not selected_collections:
-                st.warning("Please select at least one knowledge domain.")
-                selected_collections = ["default_vault"]
+            if os.path.exists(direct_root):
+                all_folders = [f.name for f in Path(direct_root).iterdir() if f.is_dir()]
+                selected_folder_names = st.multiselect("Select Job Folders", all_folders, help="Select processed folders to search directly without a vector database.")
+                selected_folders = [str(Path(direct_root) / f) for f in selected_folder_names]
+            else:
+                st.warning("Specified root path does not exist.")
         else:
-            st.warning("No active collections identified.")
-            selected_collections = ["default_vault"]
+            st.subheader("Knowledge Domains")
+            temp_ve = VectorEngine(embed_model=selected_embed)
+            collections = temp_ve.list_collections()
+            if collections:
+                all_selected = st.checkbox("Select All Vaults", value=False)
+                with st.container(border=True):
+                    for col in collections:
+                        if st.checkbox(col, value=all_selected, key=f"sel_{col}"):
+                            selected_collections.append(col)
+                
+                if not selected_collections:
+                    st.warning("Please select at least one knowledge domain.")
+                    selected_collections = ["default_vault"]
+            else:
+                st.warning("No active collections identified.")
+                selected_collections = ["default_vault"]
     else:
         selected_collections = ["default_vault"]
+        retrieval_strategy = "Vector Vault (Approach 1)"
+        selected_folders = []
 
     st.divider()
     st.subheader("Operational Scope")
     run_extraction = st.checkbox("Enable Document Extraction", value=True)
-    direct_llm_mode = st.toggle("Enable Direct LLM Mode (No Vector DB)", value=False, help="Bypasses indexing and sends the full document text directly to the LLM.")
-    run_indexing = st.checkbox("Enable Vector Indexing", value=not direct_llm_mode, disabled=direct_llm_mode)
+    run_indexing = st.checkbox("Enable Vector Indexing", value=True)
     
     if st.button("Purge Session State", width="stretch"):
         st.session_state.messages = []
         st.session_state.session_logs = []
-        st.session_state.direct_results = {} # Clear direct results
         st.cache_resource.clear()
         st.rerun()
 
 # Initialize engines only when needed for performance
 if nav_choice == "Cognitive Research Lab":
-    ves, ge, orch = initialize_system(selected_llm, selected_embed, selected_collections)
+    ves, ge, orch = initialize_system(selected_llm, selected_embed, selected_collections, strategy=retrieval_strategy, folder_paths=selected_folders)
 else:
     ves, ge, orch = [], None, None
-
-# --- STATE PERSISTENCE ---
-if "direct_results" not in st.session_state:
-    st.session_state.direct_results = {} # Stores filename -> aggregated_text
 
 # --- MAIN INTERFACE ---
 
@@ -537,9 +547,7 @@ elif nav_choice == "Knowledge Engineering Studio":
                     "target_path": target_path, "use_ocr": ocr_enabled, "use_formula": formula_enabled,
                     "seg_strategy": seg_strategy.split()[0].lower(), "extract_mode": extract_mode,
                     "chunk_val": chunk_val, "skip_head": skip_head, "skip_tail": skip_tail, 
-                    "run_indexing": run_indexing if not direct_llm_mode else False, 
-                    "direct_llm": direct_llm_mode,
-                    "embed_model": selected_embed,
+                    "run_indexing": run_indexing, "embed_model": selected_embed,
                     "collection_name": target_collection, "is_folder_mode": processing_mode == "Directory Batch"
                 }
                 thread = threading.Thread(target=background_worker, args=(job_id, files, config_params))
@@ -551,17 +559,26 @@ elif nav_choice == "Knowledge Engineering Studio":
 elif nav_choice == "Cognitive Research Lab":
     st.header("Cognitive Research Lab")
     
-    # Mode selection in the lab
-    analysis_mode = st.radio("Intelligence Strategy", ["Neural RAG (Search & Synthesize)", "Direct Document Analysis (Global Context)"], horizontal=True)
+    # Check for available data across engines
+    total_chunks = 0
+    for v_eng in ves:
+        try:
+            v_eng.load()
+            total_chunks += v_eng.count()
+        except Exception as e:
+            logger.error(f"Failed to load engine {v_eng}: {e}")
 
-    if analysis_mode == "Neural RAG (Search & Synthesize)":
-        # Check for indices
-        for v_eng in ves: v_eng.load()
-        total_chunks = sum(v_eng.collection.count() for v_eng in ves)
-
-        if total_chunks == 0:
-            with st.container(border=True):
-                st.subheader("🚀 Initializing Strategic Insights")
+    if total_chunks == 0:
+        with st.container(border=True):
+            st.subheader("🚀 Initializing Strategic Insights")
+            if "Approach 2" in retrieval_strategy:
+                st.markdown("""
+                Direct Analysis mode is active, but no segments have been loaded. 
+                
+                1. **Select** one or more **Job Folders** in the sidebar.
+                2. If the list is empty, process a document in the **Knowledge Engineering Studio**.
+                """)
+            else:
                 st.markdown("""
                 The Cognitive Research Lab is ready, but your neural vault is currently empty. Follow these steps to begin:
                 
@@ -572,42 +589,24 @@ elif nav_choice == "Cognitive Research Lab":
                 
                 *Operational Note: Multi-domain cross-referencing is enabled by default.*
                 """)
-                st.info("The system will automatically synthesize evidence across all selected knowledge domains.")
-            st.stop()
-    else:
-        # Direct Mode - Look for aggregated text in output root
-        st.info("Direct Mode: Analyzing full document context. Best for global themes and summaries.")
-        output_root = Path(config.OUTPUT_ROOT)
-        available_docs = [d.name for d in output_root.iterdir() if d.is_dir()]
-        
-        if not available_docs:
-            st.warning("No processed documents found. Please process documents in the Studio first.")
-            st.stop()
-            
-        selected_doc_name = st.selectbox("Target Document", available_docs)
-        doc_path = output_root / selected_doc_name
-        chunks_file = doc_path / "chunks.json"
-        
-        if not chunks_file.exists():
-            st.error(f"Integrity Error: Chunks metadata missing for {selected_doc_name}.")
-            st.stop()
-        
-        # Load and aggregate text if not in state
-        if selected_doc_name not in st.session_state.direct_results:
-            with open(chunks_file, 'r', encoding='utf-8') as f:
-                chunks = json.load(f)
-                st.session_state.direct_results[selected_doc_name] = "\n\n".join([c.get('text', '') for c in chunks])
-        
-        st.success(f"Context Ready: {len(st.session_state.direct_results[selected_doc_name])} characters loaded.")
+            st.info("The system will automatically synthesize evidence across all selected knowledge domains.")
+        st.stop()
 
-    st.markdown(f"**Runtime Intelligence:** `{selected_llm}`")
+    if "Approach 2" in retrieval_strategy:
+        active_display = f"`{', '.join([Path(p).name for p in selected_folders])}`"
+        mode_label = "Direct Folders"
+    else:
+        active_display = f"`{', '.join(selected_collections)}`"
+        mode_label = "Vault Domains"
+
+    st.markdown(f"**Strategy:** `{retrieval_strategy}` | **{mode_label}:** {active_display} | **Total Segments:** `{total_chunks}`")
     
     chat_container = st.container(height=520, border=False)
     with chat_container:
         for m in st.session_state.messages:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
-                if m["role"] == "assistant" and "sources" in m and m["sources"]:
+                if m["role"] == "assistant" and "sources" in m:
                     with st.expander("Evidence Registry & Provenance"):
                         for i, s in enumerate(m["sources"]):
                             meta = s["metadata"]
@@ -634,21 +633,12 @@ elif nav_choice == "Cognitive Research Lab":
                 placeholder = st.empty()
                 full_text = ""
                 hits = []
-                
-                if analysis_mode == "Neural RAG (Search & Synthesize)":
-                    stream = orch.query_stream(q, top_k=5)
-                    for chunk in stream:
-                        if chunk["type"] == "sources": 
-                            hits = [s.model_dump() for s in chunk["content"]]
-                        elif chunk["type"] == "answer_chunk":
-                            full_text += chunk["content"]
-                            placeholder.markdown(full_text + "▌")
-                else:
-                    # Direct Analysis
-                    context = st.session_state.direct_results[selected_doc_name]
-                    stream = ge.generate_direct(q, context)
-                    for chunk in stream:
-                        full_text += chunk
+                stream = orch.query_stream(q, top_k=5)
+                for chunk in stream:
+                    if chunk["type"] == "sources": 
+                        hits = [s.model_dump() for s in chunk["content"]]
+                    elif chunk["type"] == "answer_chunk":
+                        full_text += chunk["content"]
                         placeholder.markdown(full_text + "▌")
                 
                 placeholder.markdown(full_text)
