@@ -153,6 +153,9 @@ class VectorEngine(BaseRetrievalEngine):
             logger.error(f"VectorEngine Load Error: {e}")
             raise
 
+    def unload(self):
+        pass # Client management is handled by ChromaDB; reranker is in ModelManager
+
     def count(self) -> int:
         self.load()
         return self.collection.count() if self.collection else 0

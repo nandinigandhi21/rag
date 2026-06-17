@@ -1,4 +1,12 @@
 import streamlit as st
+
+# --- ARCHITECTURAL STYLING ---
+st.set_page_config(
+    page_title="Amaya",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import os
 import threading
 import queue
@@ -18,6 +26,7 @@ from schema import IngestionResult, SearchResult
 from ingestion_engine import IngestionEngine
 from vector_engine import VectorEngine
 from generation_engine import GenerationEngine, RAGOrchestrator
+from presentation_engine import PresentationEngine
 
 # --- HELPERS ---
 def render_citation_card(index: int, hit: dict):
@@ -353,6 +362,8 @@ if "session_logs" not in st.session_state:
     st.session_state.session_logs = []
 if "nav_choice" not in st.session_state:
     st.session_state.nav_choice = "Executive Overview"
+if "nav_radio" not in st.session_state:
+    st.session_state.nav_radio = "Executive Overview"
 if "telemetry" not in st.session_state:
     st.session_state.telemetry = {"tps": [], "latency": []}
 
@@ -496,6 +507,10 @@ with st.sidebar:
 # Initialize engines only when needed for performance
 if nav_choice == "Cognitive Research Lab":
     ves, ge, orch = initialize_system(selected_llm, selected_embed, selected_collections, strategy=retrieval_strategy, folder_paths=selected_folders)
+elif nav_choice == "Strategic Presentation Suite":
+    ves, orch = [], None
+    ge = GenerationEngine()
+    ge.model_name = selected_llm
 else:
     ves, ge, orch = [], None, None
 
@@ -507,8 +522,12 @@ if nav_choice == "Executive Overview":
     st.markdown("Welcome to **Amaya**, the next-generation Operational Intelligence Platform. Navigate through our core modules to manage your knowledge architecture and extract strategic, hallucination-free insights.")
     
     st.divider()
+
+    def navigate_to(page_name):
+        st.session_state.nav_choice = page_name
+        st.session_state.nav_radio = page_name
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         with st.container(border=True):
@@ -519,12 +538,23 @@ if nav_choice == "Executive Overview":
             Architect your data environment through high-fidelity ingestion, structural decomposition, and semantic indexing.
             
             *   Convert raw PDFs into neural assets.
-            *   Configure OCR and Table Vision.
+            *   Configure Hybrid Search capabilities.
             *   Build custom Knowledge Domains.
             """)
-            if st.button("Enter Studio", width="stretch", key="btn_eng"):
-                st.session_state.nav_choice = "Knowledge Engineering Studio"
-                st.rerun()
+            st.button("Enter Studio", width="stretch", key="btn_eng", on_click=navigate_to, args=("Knowledge Engineering Studio",))
+
+        with st.container(border=True):
+            st.subheader("📈 Strategic Presentation Suite")
+            st.markdown("""
+            **Automated Executive Reporting.**
+            
+            Transform your document intelligence into boardroom-ready PowerPoint presentations using neural summarization.
+            
+            *   Automated `.pptx` generation.
+            *   Custom presentation personas.
+            *   Convert research sessions to slides.
+            """)
+            st.button("Open Presentation Suite", width="stretch", key="btn_ppt", on_click=navigate_to, args=("Strategic Presentation Suite",))
 
     with col2:
         with st.container(border=True):
@@ -532,17 +562,14 @@ if nav_choice == "Executive Overview":
             st.markdown("""
             **Advanced Insight Synthesis.**
             
-            Engage with your knowledge base through state-of-the-art RAG orchestration and cross-domain research.
+            Engage with your knowledge base through state-of-the-art RAG orchestration and hybrid cross-domain research.
             
-            *   Multi-vault semantic search.
-            *   Cited evidence & provenance.
-            *   Neural research assistance.
+            *   Vector + BM25 Hybrid search.
+            *   Multi-Modal evidence & provenance.
+            *   Customizable AI personas.
             """)
-            if st.button("Initialize Research", width="stretch", key="btn_res"):
-                st.session_state.nav_choice = "Cognitive Research Lab"
-                st.rerun()
+            st.button("Initialize Research", width="stretch", key="btn_res", on_click=navigate_to, args=("Cognitive Research Lab",))
 
-    with col3:
         with st.container(border=True):
             st.subheader("📊 Infrastructure Stats")
             st.markdown("""
@@ -550,13 +577,11 @@ if nav_choice == "Executive Overview":
             
             Monitor compute resources, model health, and repository telemetry for the entire ecosystem.
             
-            *   GPU/CPU resource tracking.
-            *   Ollama inference monitoring.
+            *   GPU/CPU VRAM resource tracking.
+            *   Live inference TPS & Latency metrics.
             *   Index growth & health analytics.
             """)
-            if st.button("View Telemetry", width="stretch", key="btn_inf"):
-                st.session_state.nav_choice = "Infrastructure Stats"
-                st.rerun()
+            st.button("View Telemetry", width="stretch", key="btn_inf", on_click=navigate_to, args=("Infrastructure Stats",))
 
     st.divider()
     with st.expander("System Architecture Overview"):
@@ -651,16 +676,20 @@ elif nav_choice == "Knowledge Engineering Studio":
         extract_mode = st.selectbox("Fidelity Level", ["accurate", "fast"], index=0, help="Accurate mode utilizes TableFormerV2 models for structural precision.")
 
     if st.button("Initiate Engineering Workflow", type="primary", use_container_width=True):
-        if not source_path or not os.path.exists(source_path):
-            st.error("Validation Failure: Valid system path required.")
+        # Automatically clean up pasted paths (remove quotes and extra spaces)
+        clean_source = source_path.strip(' "\'') if source_path else ""
+        clean_target = target_path.strip(' "\'') if target_path else ""
+        
+        if not clean_source or not os.path.exists(clean_source):
+            st.error(f"Validation Failure: Valid system path required. Received: '{clean_source}'")
         else:
-            files = [str(f) for f in Path(source_path).glob("*.pdf")] if os.path.isdir(source_path) else ([source_path] if source_path.endswith(".pdf") else [])
+            files = [str(f) for f in Path(clean_source).glob("*.pdf")] if os.path.isdir(clean_source) else ([clean_source] if clean_source.lower().endswith(".pdf") else [])
             if not files:
                 st.warning("Notification: No valid PDF candidates identified.")
             else:
                 job_id = jm.create_job(Path(files[0]).name if len(files)==1 else f"Batch ({len(files)} files)")
                 config_params = {
-                    "target_path": target_path, "use_ocr": ocr_enabled, "use_formula": formula_enabled,
+                    "target_path": clean_target, "use_ocr": ocr_enabled, "use_formula": formula_enabled,
                     "extract_images": extract_images_enabled,
                     "seg_strategy": seg_strategy.split()[0].lower(), "extract_mode": extract_mode,
                     "chunk_val": chunk_val, "skip_head": skip_head, "skip_tail": skip_tail, 
@@ -827,29 +856,43 @@ elif nav_choice == "Strategic Presentation Suite":
             # 2. LLM Summarization for PPT
             st.write("Neural Summarization Engine active...")
             summary_prompt = f"""
-            Analyze the following context and create a professional presentation structure with exactly {slide_count} slides.
-            Use the following tone: {ppt_persona}.
+            Output a plain-text structure for exactly {slide_count} presentation slides.
             
-            Output your response in this EXACT format for EVERY slide:
-            SLIDE: [Professional Title]
-            - [Key point or finding]
-            - [Supporting evidence or detail]
-            - [Strategic implication]
+            STRICT RULES:
+            1. ONLY output the slide data. No introduction or conversational text.
+            2. Start every slide with 'SLIDE: [Professional Title]'.
+            3. Use only '-' (hyphen) for bullet points.
+            4. Keep bullet points short (max 15 words).
+            5. Do NOT include any instructions like 'Insert Image' or 'Add Table'.
+            6. Do NOT use markdown bolding (**) or italics.
+            
+            Example:
+            SLIDE: Executive Summary
+            - Total revenue grew by 15% this quarter.
+            - Costs remained stable despite market volatility.
             """
             
             full_summary = ""
-            # We use a non-streaming call here for simpler parsing
-            for chunk in ge.generate_stream(f"Create a PowerPoint summary of this document in {slide_count} slides.", context, persona="Executive Summarizer", custom_instructions=summary_prompt):
-                full_summary += chunk
+            for chunk in ge.generate_stream(f"Create a simple text-only PowerPoint summary in {slide_count} slides.", context, persona="Executive Summarizer", custom_instructions=summary_prompt):
+                if not chunk.startswith("__METRICS__|"):
+                    full_summary += chunk
             
             # 3. Build PPTX
             st.write("Constructing PPTX hierarchy...")
             slides_data = pe.parse_llm_summary(full_summary)
             
+            if not slides_data:
+                st.error("Intelligence Parsing Failure: The AI response did not follow the required slide format.")
+                with st.expander("Debug: Raw AI Response"):
+                    st.code(full_summary)
+                status.update(label="Architectural Failure", state="error")
+                st.stop()
+            
             out_file = Path(config.OUTPUT_ROOT) / f"Presentation_{datetime.now().strftime('%H%M%S')}.pptx"
+            
             ppt_path = pe.create_presentation(
-                title=f"Strategic Intelligence: {subject}",
-                subtitle=f"Generated via Amaya Enterprise Platform | {datetime.now().strftime('%Y-%m-%d')}",
+                title=f"Executive Summary: {subject}",
+                subtitle=f"Generated via Amaya | {datetime.now().strftime('%Y-%m-%d')}",
                 slides_data=slides_data,
                 output_path=out_file
             )

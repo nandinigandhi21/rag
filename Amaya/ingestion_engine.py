@@ -75,14 +75,16 @@ class IngestionEngine:
             }
         )
         
-        tokenizer_path = str(config.MODELS_CACHE / "docling-project--CodeFormulaV2")
+        # Docling chunkers require a HuggingFace tokenizer identifier or an exact valid local directory.
+        # We use a standard fast tokenizer for generic text chunking.
+        tokenizer_model = str(config.RERANKER_MODEL_PATH)
         max_tokens = chunker_kwargs.get("max_tokens", config.DEFAULT_MAX_TOKENS)
         merge_peers = chunker_kwargs.get("merge_peers", config.DEFAULT_MERGE_PEERS)
 
         if self.strategy == "hierarchical":
-            self.chunker = HierarchicalChunker(tokenizer=tokenizer_path, max_tokens=max_tokens)
+            self.chunker = HierarchicalChunker(tokenizer=tokenizer_model, max_tokens=max_tokens)
         else:
-            self.chunker = HybridChunker(tokenizer=tokenizer_path, max_tokens=max_tokens, merge_peers=merge_peers)
+            self.chunker = HybridChunker(tokenizer=tokenizer_model, max_tokens=max_tokens, merge_peers=merge_peers)
 
     def _save_table(self, table, i, table_dir):
         """Exports extracted tables to CSV format."""
