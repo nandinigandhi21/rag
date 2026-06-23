@@ -29,6 +29,54 @@ from generation_engine import GenerationEngine, RAGOrchestrator
 from presentation_engine import PresentationEngine
 
 # --- HELPERS ---
+def save_uploaded_file(uploaded_file) -> str:
+    """
+    Persists a single Streamlit-uploaded file to a local staging folder and
+    returns its on-disk path.
+
+    Browsers run inside a security sandbox: JavaScript (and therefore
+    Streamlit's `st.file_uploader`, which is just a styled native browser
+    file input) can never reveal a real absolute path on the user's disk.
+    It only ever hands back the file's bytes + original filename. So the
+    "Browse" button here is Streamlit's own built-in uploader widget, and
+    this helper just writes those bytes to a folder our pipeline owns,
+    giving the rest of the app (which expects real file paths) something
+    to work with. Since the Streamlit server and the browser are on the
+    same machine in this app, this is just an instant local copy.
+
+    Args:
+        uploaded_file: The UploadedFile object returned by st.file_uploader.
+
+    Returns:
+        str: Absolute path to the staged copy of the uploaded file.
+    """
+    staging_dir = Path(config.OUTPUT_ROOT) / "_uploads"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = staging_dir / uploaded_file.name
+    with open(saved_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return str(saved_path)
+
+def save_uploaded_batch(uploaded_files) -> str:
+    """
+    Persists multiple Streamlit-uploaded files into a single, freshly created
+    staging directory, so the existing directory-glob logic downstream
+    (`Path(clean_source).glob("*.pdf")`) keeps working unchanged.
+
+    Args:
+        uploaded_files: List of UploadedFile objects from a multi-file
+        st.file_uploader.
+
+    Returns:
+        str: Absolute path to the staging directory containing the copies.
+    """
+    batch_dir = Path(config.OUTPUT_ROOT) / "_uploads" / f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    for uf in uploaded_files:
+        with open(batch_dir / uf.name, "wb") as f:
+            f.write(uf.getbuffer())
+    return str(batch_dir)
+
 def render_citation_card(index: int, hit: dict):
     """Renders a visually rich citation card, natively supporting markdown tables and images."""
     meta = hit["metadata"]
@@ -625,7 +673,18 @@ elif nav_choice == "Knowledge Engineering Studio":
         if processing_mode == "Individual Document":
             c1, c2 = st.columns([2, 1])
             with c1:
-                source_path = st.text_input("Source Document Path (PDF)", placeholder="C:\\Data\\Executive_Report.pdf")
+                if "ke_source_path_input" not in st.session_state:
+                    st.session_state["ke_source_path_input"] = ""
+                path_col, browse_col = st.columns([3, 2])
+                with browse_col:
+                    uploaded_file = st.file_uploader("Browse Files", type=["pdf"], key="ke_browse_individual", help="Browse your PC for a PDF file")
+                    if uploaded_file is not None:
+                        saved_path = save_uploaded_file(uploaded_file)
+                        if saved_path != st.session_state.get("ke_source_path_input"):
+                            st.session_state["ke_source_path_input"] = saved_path
+                            st.rerun()
+                with path_col:
+                    source_path = st.text_input("Source Document Path (PDF)", placeholder="C:\\Data\\Executive_Report.pdf", key="ke_source_path_input")
                 target_path = st.text_input("Asset Repository Root", value=str(config.OUTPUT_ROOT))
                 target_collection = st.text_input("Target Knowledge Domain", value="intel_vault", key="target_col_input")
             with c2:
@@ -640,7 +699,11 @@ elif nav_choice == "Knowledge Engineering Studio":
                     doc = fitz.open(source_path)
                     total_p = len(doc)
                     st.markdown(f"**Live Document Preview** | {total_p} Pages")
-                    page_to_show = st.slider("Page Selection", 1, total_p, 1)
+                    if total_p > 1:
+                        page_to_show = st.slider("Page Selection", 1, total_p, 1)
+                    else:
+                        st.caption("Single-page document — page 1 of 1.")
+                        page_to_show = 1
                     page = doc.load_page(page_to_show - 1)
                     pix = page.get_pixmap(matrix=fitz.Matrix(0.6, 0.6))
                     st.image(pix.tobytes(), use_container_width=False)
@@ -650,7 +713,18 @@ elif nav_choice == "Knowledge Engineering Studio":
         else:
             c1, c2 = st.columns(2)
             with c1:
-                source_path = st.text_input("Source Directory", placeholder="C:\\Archive\\Annual_Reports")
+                if "ke_source_dir_input" not in st.session_state:
+                    st.session_state["ke_source_dir_input"] = ""
+                path_col, browse_col = st.columns([3, 2])
+                with browse_col:
+                    uploaded_files = st.file_uploader("Browse Files", type=["pdf"], accept_multiple_files=True, key="ke_browse_batch", help="Browse your PC and select all PDFs for this batch")
+                    if uploaded_files:
+                        staged_dir = save_uploaded_batch(uploaded_files)
+                        if staged_dir != st.session_state.get("ke_source_dir_input"):
+                            st.session_state["ke_source_dir_input"] = staged_dir
+                            st.rerun()
+                with path_col:
+                    source_path = st.text_input("Source Directory", placeholder="C:\\Archive\\Annual_Reports", key="ke_source_dir_input")
                 target_path = st.text_input("Global Repository Root", value=str(config.OUTPUT_ROOT))
             with c2:
                 target_collection = st.text_input("Target Knowledge Domain", value="batch_intel", key="target_col_input")

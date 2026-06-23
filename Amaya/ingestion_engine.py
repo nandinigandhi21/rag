@@ -229,3 +229,64 @@ class IngestionEngine:
         except Exception as e:
             logger.error(f"Ingestion process failed: {e}")
             raise
+
+    def process_batch(self, input_dir: str, output_root: Optional[str] = None, skip_start: int = 0, skip_end: int = 0, status_callback: Optional[Callable[[str], None]] = None, batch_size: int = 15, recursive: bool = False) -> List[IngestionResult]:
+        """
+        Batch-processes every PDF found inside a directory, isolating each document's
+        output into its own subdirectory under the repository root.
+
+        This is an additive convenience method for the "Directory Batch" ingestion mode
+        used by the GUI's file/folder browser feature. It does not alter the behavior
+        of the existing single-document `process()` method, which it calls internally
+        for each discovered PDF.
+
+        Args:
+            input_dir (str): Path to the directory containing PDF files to ingest.
+            output_root (Optional[str]): Root directory where per-document subfolders are created.
+            skip_start (int): Pages to skip from the start of each document.
+            skip_end (int): Pages to skip from the end of each document.
+            status_callback (Optional[Callable[[str], None]]): Optional progress callback.
+            batch_size (int): Page batch size passed through to `process()`.
+            recursive (bool): If True, also searches subdirectories for PDF files.
+
+        Returns:
+            List[IngestionResult]: One result per successfully processed PDF. Documents
+            that fail are logged and skipped so the rest of the batch can continue.
+        """
+        input_dir = Path(input_dir)
+        if not input_dir.exists() or not input_dir.is_dir():
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+        output_root = Path(output_root or config.OUTPUT_ROOT)
+        pdf_files = sorted(input_dir.rglob("*.pdf") if recursive else input_dir.glob("*.pdf"))
+
+        if not pdf_files:
+            msg = f"No PDF files found in directory: {input_dir}"
+            logger.warning(msg)
+            if status_callback: status_callback(msg)
+            return []
+
+        results: List[IngestionResult] = []
+        for idx, pdf_file in enumerate(pdf_files):
+            msg = f"Batch [{idx+1}/{len(pdf_files)}]: Processing {pdf_file.name}"
+            logger.info(msg)
+            if status_callback: status_callback(msg)
+
+            try:
+                # Isolate each document's output into its own subdirectory.
+                doc_output_root = output_root / pdf_file.stem
+                result = self.process(
+                    str(pdf_file),
+                    output_root=str(doc_output_root),
+                    skip_start=skip_start,
+                    skip_end=skip_end,
+                    status_callback=status_callback,
+                    batch_size=batch_size
+                )
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Batch ingestion failed for {pdf_file.name}: {e}")
+                continue
+
+        logger.info(f"Batch ingestion complete. {len(results)}/{len(pdf_files)} documents processed successfully.")
+        return results
