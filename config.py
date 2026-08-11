@@ -41,7 +41,7 @@ class AppConfig(BaseSettings):
     
     # --- RERANKER MODEL ---
     # Path for the local Cross-Encoder model used for high-precision ranking.
-    RERANKER_MODEL_PATH: Path = MODELS_CACHE / "ms-maro-MiniLM-L6-v2"
+    RERANKER_MODEL_PATH: Path = MODELS_CACHE / "ms-marco-MiniLM-L6-v2"
     
     # --- GENERATION MODEL ---
     # Defaulting to Qwen 3B for local LLM inference.
