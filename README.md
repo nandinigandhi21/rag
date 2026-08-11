@@ -10,7 +10,7 @@ Amaya is an enterprise-grade, privacy-preserving Retrieval-Augmented Generation 
 * **📄 Layout-Aware Document Ingestion**: Powered by **Docling**, preserving complex multi-page tables, headers, breadcrumbs, formulas, and OCR for scanned PDFs.
 * **🔍 Two-Stage Hybrid Retrieval**:
   * **Stage 1 (Fusion)**: Combines dense vector similarity (ChromaDB / Cosine) and sparse keyword search (BM25) via Reciprocal Rank Fusion (RRF).
-  * **Stage 2 (Reranking)**: Uses a local Cross-Encoder (`ms-maro-MiniLM-L6-v2`) for high-precision context relevance.
+  * **Stage 2 (Reranking)**: Uses a local Cross-Encoder (`ms-marco-MiniLM-L6-v2`) for high-precision context relevance.
 * **🧠 Local LLM Generation**: Integrates with local **Ollama** instances (`qwen2:7b`, `qwen2.5:3b`, etc.) for real-time streaming answers with exact source citations.
 * **📊 Executive Presentation Deck Generator**: Automatically distills research chat sessions into custom-themed PowerPoint (.pptx) decks.
 
@@ -26,7 +26,7 @@ Amaya is an enterprise-grade, privacy-preserving Retrieval-Augmented Generation 
             │                              │                     │
             ▼                              ▼                     ▼
 [ Presentation Generator ]     [ Local Ollama LLM ]     [ Cross-Encoder Reranker ]
-   (.pptx Export Engine)         (Qwen2 / Nomic-Embed)      (ms-maro-MiniLM-L6-v2)
+   (.pptx Export Engine)         (Qwen2 / Nomic-Embed)      (ms-marco-MiniLM-L6-v2)
 ```
 
 ---
@@ -67,7 +67,7 @@ models_cache/
 ├── docling-project--docling-models/
 ├── ds4sd--DocumentFigureClassifier/
 ├── ibm-granite--granite-docling-258M/
-└── ms-maro-MiniLM-L6-v2/
+└── ms-marco-MiniLM-L6-v2/
 ```
 
 #### Model Descriptions:
@@ -78,7 +78,7 @@ models_cache/
 * **`docling-project--docling-models/`**: Core Docling parser assets and metadata.
 * **`ds4sd--DocumentFigureClassifier/`**: Document element classification model for identifying figures, charts, and diagrams.
 * **`ibm-granite--granite-docling-258M/`**: IBM Granite lightweight VLM model for layout & visual parsing.
-* **`ms-maro-MiniLM-L6-v2/`**: Cross-Encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) used for two-stage RAG query reranking.
+* **`ms-marco-MiniLM-L6-v2/`**: Cross-Encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) used for two-stage RAG query reranking.
 
 ---
 
@@ -93,7 +93,7 @@ Run these commands on an **online machine** prior to transferring the files to y
 mkdir models_cache
 
 # Download Reranker Model
-huggingface-cli download cross-encoder/ms-marco-MiniLM-L-6-v2 --local-dir models_cache/ms-maro-MiniLM-L6-v2
+huggingface-cli download cross-encoder/ms-marco-MiniLM-L-6-v2 --local-dir models_cache/ms-marco-MiniLM-L6-v2
 
 # Download Docling & Layout Models
 huggingface-cli download docling-project/TableFormerV2 --local-dir models_cache/docling-project--TableFormerV2
@@ -114,7 +114,7 @@ from huggingface_hub import snapshot_download
 cache_dir = Path("models_cache")
 
 models = {
-    "ms-maro-MiniLM-L6-v2": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "ms-marco-MiniLM-L6-v2": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     "docling-project--TableFormerV2": "docling-project/TableFormerV2",
     "docling-project--CodeFormulaV2": "docling-project/CodeFormulaV2",
     "docling-project--docling-layout-heron": "docling-project/docling-layout-heron",
@@ -240,7 +240,7 @@ Amaya automatically configures offline environment flags upon startup. Settings 
 | `OLLAMA_LLM_MODEL` | `qwen2.5:3b` | Active LLM model name in Ollama. |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text:latest` | Active embedding model name in Ollama. |
 | `MODELS_CACHE` | `BASE_DIR / "models_cache"` | Local directory for cached models. |
-| `RERANKER_MODEL_PATH` | `MODELS_CACHE / "ms-maro-MiniLM-L6-v2"` | Path to the Cross-Encoder model. |
+| `RERANKER_MODEL_PATH` | `MODELS_CACHE / "ms-marco-MiniLM-L6-v2"` | Path to the Cross-Encoder model. |
 
 ---
 
