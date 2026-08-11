@@ -1,0 +1,46 @@
+# Amaya RAG System - Project Dependencies
+
+# --- Web Framework & GUI ---
+streamlit
+
+# --- Configuration & Validation ---
+pydantic
+pydantic-settings
+python-dotenv
+
+# --- Document Parsing & Ingestion (Docling & OCR) ---
+docling
+docling-core
+docling-ibm-models
+docling-parse
+PyMuPDF
+pypdf
+rapidocr-onnxruntime
+
+# --- Vector Store & Search Engines ---
+chromadb
+sentence-transformers
+rank-bm25
+
+# --- Deep Learning & NLP Frameworks ---
+torch
+torchvision
+transformers
+huggingface-hub
+onnxruntime
+safetensors
+scikit-learn
+
+# --- Presentation & Document Export ---
+python-pptx
+python-docx
+openpyxl
+xlsxwriter
+
+# --- Data Science & Utilities ---
+numpy
+pandas
+requests
+urllib3
+pillow
+tqdm
